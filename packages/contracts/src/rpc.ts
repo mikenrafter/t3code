@@ -223,6 +223,7 @@ import {
   ProviderConsumeResetCreditInput,
   ProviderConsumeResetCreditResult,
 } from "./providerUsageLimits.ts";
+import { LiveQuotaResult } from "./liveQuota.ts";
 import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
@@ -337,6 +338,7 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+  serverGetLiveQuota: "server.getLiveQuota",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -585,6 +587,18 @@ const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
 const WsServerRefreshUsageRatesRpc = Rpc.make(WS_METHODS.serverRefreshUsageRates, {
   payload: Schema.Struct({}),
   success: UsagePricing,
+  error: EnvironmentAuthorizationError,
+});
+
+/**
+ * Per-provider failures never fail this RPC as a whole — they show up as a
+ * `status: "missing" | "unauthenticated" | "failed"` entry in the result
+ * array instead (see {@link LiveQuotaResult}), so the only failure mode here
+ * is the authorization boundary itself.
+ */
+export const WsServerGetLiveQuotaRpc = Rpc.make(WS_METHODS.serverGetLiveQuota, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(LiveQuotaResult),
   error: EnvironmentAuthorizationError,
 });
 
@@ -1228,6 +1242,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRetryResourceTelemetryRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
+  WsServerGetLiveQuotaRpc,
   WsServerSignalProcessRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,

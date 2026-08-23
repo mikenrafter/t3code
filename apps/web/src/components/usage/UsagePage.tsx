@@ -23,6 +23,7 @@ import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
 import { environmentPresentations } from "../../state/presentation";
 import { serverEnvironment } from "../../state/server";
+import { useLiveQuota } from "../../state/liveQuota";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
@@ -58,6 +59,7 @@ import {
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { LiveQuotaCards } from "./LiveQuotaCards";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
@@ -109,14 +111,15 @@ export function UsagePage() {
     useState<ReadonlySet<EnvironmentId> | null>(null);
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, selectedEnvironments, isPending, isPartial, refresh } = useUsage(
-    window,
-    selectedEnvironmentIds,
-  );
-  const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
-    reportFailure: false,
-  });
+const { merged, environments, selectedEnvironments, isPending, isPartial, refresh } = useUsage(
+  window,
+  selectedEnvironmentIds,
+);
+const { results: liveQuotaResults, refresh: refreshLiveQuota } = useLiveQuota();
+const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+  reportFailure: false,
+});
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -342,6 +345,7 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
+<LiveQuotaCards results={liveQuotaResults} onRetry={refreshLiveQuota} />
             {selectedEnvironments.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {environments.length === 0
