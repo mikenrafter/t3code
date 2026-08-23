@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
+import { useLiveQuota } from "../../state/liveQuota";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import {
   enumerateDays,
@@ -18,6 +19,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { SidebarInset } from "../ui/sidebar";
 import { WorkspaceBreadcrumb, WorkspaceBreadcrumbItem } from "../WorkspaceBreadcrumb";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "../../workspaceTitlebar";
+import { LiveQuotaCards } from "./LiveQuotaCards";
 import { UsageChartLegend, UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK, PROVIDER_ORDER } from "./usageProviders";
 
@@ -36,6 +38,7 @@ export function UsagePage() {
   // shift the range and refetch every environment.
   const window = useMemo(() => makeWindow(windowDays), [windowDays]);
   const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+  const { results: liveQuotaResults, refresh: refreshLiveQuota } = useLiveQuota();
 
   // Hold the content until every environment is terminal. Rendering merged
   // totals while devices are still answering makes every number on the page
@@ -93,6 +96,8 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-6">
+            <LiveQuotaCards results={liveQuotaResults} onRetry={refreshLiveQuota} />
+
             <div className="flex flex-wrap items-center justify-between gap-4">
               <p className="text-sm text-muted-foreground">
                 {formatDayShort(window.sinceDay)} to {formatDayShort(window.untilDay)}
