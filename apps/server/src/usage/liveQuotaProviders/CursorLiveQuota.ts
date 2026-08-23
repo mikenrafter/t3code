@@ -200,6 +200,68 @@ export const readCursorAuth = (
     };
   });
 
+/**
+ * `cursor-agent`'s own auth store — separate from the Cursor IDE's
+ * `state.vscdb`. A user who only runs the CLI (never opens the IDE) has a
+ * live session only here; a user who only uses the IDE has one only in
+ * `state.vscdb`. Checked as a fallback, not primary, matching the reference
+ * script's IDE-first precedent and avoiding an extra file read plus a
+ * duplicate set of dashboard calls when the IDE session already works.
+ */
+export const resolveCursorCliAuthPath = (
+  homeDir: string = NodeOS.homedir(),
+): Effect.Effect<string, never, Path.Path> =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    return path.join(homeDir, ".config", "cursor", "auth.json");
+  });
+
+interface CursorCliAuthFile {
+  readonly accessToken?: unknown;
+  readonly refreshToken?: unknown;
+}
+
+const parseCursorCliAuthFile = (raw: string): CursorCliAuthFile | null => {
+  try {
+    return JSON.parse(raw) as CursorCliAuthFile;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Reads `cursor-agent`'s `auth.json`. Unlike `state.vscdb`'s `ItemTable`,
+ * this file carries no email/membership fields — both are `null` on the
+ * resulting record, and the UI already renders a `null` email as "No
+ * account".
+ */
+export const readCursorCliAuth = (
+  authPath: string,
+): Effect.Effect<CursorAuthReadResult, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const raw = yield* fileSystem
+      .readFileString(authPath)
+      .pipe(Effect.catchCause(() => Effect.succeed(null)));
+    if (raw === null) return { status: "missing" as const };
+
+    const parsed = parseCursorCliAuthFile(raw);
+    if (parsed === null) return { status: "missing" as const };
+
+    const accessToken = typeof parsed.accessToken === "string" ? parsed.accessToken : null;
+    if (accessToken === null || accessToken.length === 0) return { status: "missing" as const };
+
+    const userId = decodeCursorAccessTokenUserId(accessToken);
+    if (userId === null) return { status: "missing" as const };
+
+    const refreshToken = typeof parsed.refreshToken === "string" ? parsed.refreshToken : null;
+
+    return {
+      status: "ok" as const,
+      record: { accessToken, refreshToken, email: null, membership: null, userId },
+    };
+  });
+
 const cursorCookie = (userId: string, token: string): string =>
   `WorkosCursorSessionToken=${userId}::${token}`;
 
@@ -491,14 +553,30 @@ export const make: Effect.Effect<
       }
 
       const dbPath = yield* resolveCursorStateDbPath();
-      const authResult = yield* readCursorAuth(dbPath);
+      const ideAuth = yield* readCursorAuth(dbPath);
 
-      const result: LiveQuotaResult =
-        authResult.status === "missing"
+      const ideResult: LiveQuotaResult =
+        ideAuth.status === "missing"
           ? missingResult()
-          : authResult.status === "failed"
-            ? failedResult(authResult.message)
-            : yield* computeCursorResult(authResult.record, nowMs);
+          : ideAuth.status === "failed"
+            ? failedResult(ideAuth.message)
+            : yield* computeCursorResult(ideAuth.record, nowMs);
+
+      // A real "ok" from the IDE session always wins without touching the
+      // CLI auth file at all; only fall back when the IDE gave us nothing
+      // usable (never signed in, a stale/expired session, or a local read
+      // failure), since the two sessions can go stale independently of each
+      // other.
+      const result: LiveQuotaResult =
+        ideResult.status === "ok"
+          ? ideResult
+          : yield* Effect.gen(function* () {
+              const cliAuthPath = yield* resolveCursorCliAuthPath();
+              const cliAuth = yield* readCursorCliAuth(cliAuthPath);
+              return cliAuth.status === "ok"
+                ? yield* computeCursorResult(cliAuth.record, nowMs)
+                : ideResult;
+            });
 
       yield* Ref.set(cacheRef, { result, fetchedAtMs: nowMs });
       return result;

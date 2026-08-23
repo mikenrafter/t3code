@@ -131,6 +131,27 @@ export const readClaudeAccessToken = (
     return { status: "ok" as const, accessToken };
   });
 
+/**
+ * Claude's config dir is the home itself when overridden via
+ * `CLAUDE_CONFIG_DIR`, but a default (unconfigured) install nests
+ * `.credentials.json` under `~/.claude` — the same ambiguity
+ * `UsageService.resolveClaudeTranscriptDir` probes for transcripts. Probe
+ * here too rather than assuming the unnested path, which only holds when
+ * `homePath` was explicitly set.
+ */
+export const resolveClaudeCredentialsPath = (
+  claudeHome: string,
+): Effect.Effect<string, never, FileSystem.FileSystem | Path.Path> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const nested = path.join(claudeHome, ".claude", ".credentials.json");
+    const nestedExists = yield* fileSystem
+      .exists(nested)
+      .pipe(Effect.catchCause(() => Effect.succeed(false)));
+    return nestedExists ? nested : path.join(claudeHome, ".credentials.json");
+  });
+
 const numberOr = (value: unknown, fallback = 0): number =>
   typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
@@ -301,7 +322,7 @@ export const make: Effect.Effect<
         ? Effect.succeed(failedResult("Server settings could not be read."))
         : Effect.gen(function* () {
             const claudeHome = yield* resolveClaudeHomePath(settings.success.providers.claudeAgent);
-            const credentialsPath = path.join(claudeHome, ".credentials.json");
+            const credentialsPath = yield* resolveClaudeCredentialsPath(claudeHome);
             const accountConfigPath = yield* resolveClaudeAccountConfigPath();
 
             const credentials = yield* readClaudeAccessToken(credentialsPath);
