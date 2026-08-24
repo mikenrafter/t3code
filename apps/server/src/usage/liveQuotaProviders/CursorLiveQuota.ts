@@ -1,17 +1,6 @@
 /**
- * Cursor live-quota adapter.
- *
- * Direct TS port of the DMS `aiOverviewControl` plugin's `get-cursor-usage`
- * bash+jq script: locates Cursor's local IDE session (its `state.vscdb`
- * SQLite database, the same file the Cursor IDE itself writes to), decodes
- * the stored OAuth access token to find the account's `user_id`, and calls
- * Cursor's own (undocumented) dashboard APIs to read billing-cycle usage.
- *
- * Boundary-crossing note: unlike `CursorDriver.ts`/`CursorAdapter.ts` (which
- * only ever shell out to the `cursor-agent` CLI), this reads Cursor's stored
- * IDE credentials directly and calls undocumented endpoints. That's a
- * deliberate, local-only tradeoff — see the Nix patch header this file ships
- * under for the full rationale.
+ * Cursor live-quota adapter. Reads Cursor IDE `state.vscdb` (or `cursor-agent`
+ * auth.json as fallback) and calls Cursor dashboard usage APIs.
  *
  * @module CursorLiveQuota
  */
@@ -25,71 +14,27 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
-import * as Result from "effect/Result";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import type { LiveQuotaAdapter } from "../LiveQuotaService.ts";
 
-/** Matches `CURSOR_USAGE_CACHE_TTL` in the reference bash script. */
 const CURSOR_CACHE_TTL_MS = 120_000;
-
-/** Same public OAuth client id the bash script uses to refresh tokens. */
 const CURSOR_OAUTH_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
-
 const CURSOR_PERIOD_USAGE_URL =
   "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 const CURSOR_USAGE_SUMMARY_URL = "https://cursor.com/api/usage-summary";
-const CURSOR_PLAN_INFO_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo";
 const CURSOR_OAUTH_TOKEN_URL = "https://api2.cursor.sh/oauth/token";
 
-const CURSOR_AUTH_ITEM_KEYS = {
+const CURSOR_AUTH_KEYS = {
   accessToken: "cursorAuth/accessToken",
   refreshToken: "cursorAuth/refreshToken",
   email: "cursorAuth/cachedEmail",
-  membership: "cursorAuth/stripeMembershipType",
 } as const;
-
-/** Resolves Cursor's IDE session database, defaulting to the process home. */
-export const resolveCursorStateDbPath = (
-  homeDir: string = NodeOS.homedir(),
-): Effect.Effect<string, never, Path.Path> =>
-  Effect.gen(function* () {
-    const path = yield* Path.Path;
-    return path.join(homeDir, ".config", "Cursor", "User", "globalStorage", "state.vscdb");
-  });
-
-/**
- * Decodes the (unverified) JWT payload of a Cursor access token to pull the
- * account's `user_id` out of the `sub` claim — same base64url decode the
- * bash script's inline Python does. Returns `null` for anything that isn't a
- * well-formed, decodable JWT with a non-empty `sub`, so callers can treat a
- * malformed token the same as "no token" rather than throwing.
- */
-export const decodeCursorAccessTokenUserId = (accessToken: string): string | null => {
-  const parts = accessToken.split(".");
-  const payloadSegment = parts[1];
-  if (parts.length < 2 || !payloadSegment) return null;
-
-  try {
-    const padded = payloadSegment + "=".repeat((4 - (payloadSegment.length % 4)) % 4);
-    const json = Buffer.from(padded, "base64url").toString("utf8");
-    const claims = JSON.parse(json) as { readonly sub?: unknown };
-    const sub = typeof claims.sub === "string" ? claims.sub : "";
-    if (sub.length === 0) return null;
-
-    const segments = sub.split("|");
-    const userId = segments[segments.length - 1];
-    return userId && userId.length > 0 ? userId : null;
-  } catch {
-    return null;
-  }
-};
 
 export interface CursorAuthRecord {
   readonly accessToken: string;
   readonly refreshToken: string | null;
   readonly email: string | null;
-  readonly membership: string | null;
   readonly userId: string;
 }
 
@@ -98,69 +43,39 @@ export type CursorAuthReadResult =
   | { readonly status: "failed"; readonly message: string }
   | { readonly status: "ok"; readonly record: CursorAuthRecord };
 
-const isSqliteBusyError = (cause: unknown): boolean =>
-  cause instanceof Error && /SQLITE_BUSY/i.test(cause.message);
+const decodeCursorAccessTokenUserId = (accessToken: string): string | null => {
+  const payloadSegment = accessToken.split(".")[1];
+  if (!payloadSegment) return null;
 
-const defaultOpenCursorStateDb = (dbPath: string): NodeSqlite.DatabaseSync =>
-  new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const padded = payloadSegment + "=".repeat((4 - (payloadSegment.length % 4)) % 4);
+    const claims = JSON.parse(Buffer.from(padded, "base64url").toString("utf8")) as {
+      readonly sub?: unknown;
+    };
+    const sub = typeof claims.sub === "string" ? claims.sub : "";
+    if (sub.length === 0) return null;
+    const userId = sub.split("|").at(-1);
+    return userId && userId.length > 0 ? userId : null;
+  } catch {
+    return null;
+  }
+};
 
-interface CursorAuthRawRows {
-  readonly accessToken: string | null;
-  readonly refreshToken: string | null;
-  readonly email: string | null;
-  readonly membership: string | null;
-}
-
-interface CursorAuthOpenError {
-  readonly busy: boolean;
-  readonly message: string;
-}
-
-const readCursorAuthRows = (db: NodeSqlite.DatabaseSync): CursorAuthRawRows => {
+const readCursorAuthRows = (db: NodeSqlite.DatabaseSync) => {
   const statement = db.prepare("SELECT value FROM ItemTable WHERE key = ?");
   const get = (key: string): string | null => {
     const row = statement.get(key) as { readonly value?: unknown } | undefined;
     return typeof row?.value === "string" && row.value.length > 0 ? row.value : null;
   };
   return {
-    accessToken: get(CURSOR_AUTH_ITEM_KEYS.accessToken),
-    refreshToken: get(CURSOR_AUTH_ITEM_KEYS.refreshToken),
-    email: get(CURSOR_AUTH_ITEM_KEYS.email),
-    membership: get(CURSOR_AUTH_ITEM_KEYS.membership),
+    accessToken: get(CURSOR_AUTH_KEYS.accessToken),
+    refreshToken: get(CURSOR_AUTH_KEYS.refreshToken),
+    email: get(CURSOR_AUTH_KEYS.email),
   };
 };
 
-const openAndReadCursorAuthRows = (
-  dbPath: string,
-  openDatabase: (path: string) => NodeSqlite.DatabaseSync,
-): Effect.Effect<CursorAuthRawRows, CursorAuthOpenError> =>
-  Effect.try({
-    try: () => {
-      const db = openDatabase(dbPath);
-      try {
-        return readCursorAuthRows(db);
-      } finally {
-        db.close();
-      }
-    },
-    catch: (cause): CursorAuthOpenError => ({
-      busy: isSqliteBusyError(cause),
-      message: cause instanceof Error ? cause.message : String(cause),
-    }),
-  });
-
-/**
- * Reads Cursor's stored OAuth session from `state.vscdb`.
- *
- * `state.vscdb` is a WAL-mode database the Cursor IDE may be writing to
- * concurrently, so a `SQLITE_BUSY` open/read can legitimately happen — this
- * retries once after a short delay before giving up as `"failed"`.
- * `openDatabase` is overridable so tests can simulate a busy database
- * without real file-level lock contention.
- */
 export const readCursorAuth = (
   dbPath: string,
-  openDatabase: (path: string) => NodeSqlite.DatabaseSync = defaultOpenCursorStateDb,
 ): Effect.Effect<CursorAuthReadResult, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -169,20 +84,24 @@ export const readCursorAuth = (
       .pipe(Effect.catchCause(() => Effect.succeed(false)));
     if (!exists) return { status: "missing" as const };
 
-    let attempt = yield* Effect.result(openAndReadCursorAuthRows(dbPath, openDatabase));
-    if (Result.isFailure(attempt) && attempt.failure.busy) {
-      yield* Effect.sleep("200 millis");
-      attempt = yield* Effect.result(openAndReadCursorAuthRows(dbPath, openDatabase));
-    }
+    const rows = yield* Effect.try({
+      try: () => {
+        const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+        try {
+          return readCursorAuthRows(db);
+        } finally {
+          db.close();
+        }
+      },
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.catchCause(() => Effect.succeed(null)));
 
-    if (Result.isFailure(attempt)) {
+    if (rows === null) {
       return {
         status: "failed" as const,
-        message: `Failed to read Cursor's local session database: ${attempt.failure.message}`,
+        message: "Failed to read Cursor's local session database.",
       };
     }
-
-    const rows = attempt.success;
     if (!rows.accessToken) return { status: "missing" as const };
 
     const userId = decodeCursorAccessTokenUserId(rows.accessToken);
@@ -194,47 +113,21 @@ export const readCursorAuth = (
         accessToken: rows.accessToken,
         refreshToken: rows.refreshToken,
         email: rows.email,
-        membership: rows.membership,
         userId,
       },
     };
   });
 
-/**
- * `cursor-agent`'s own auth store — separate from the Cursor IDE's
- * `state.vscdb`. A user who only runs the CLI (never opens the IDE) has a
- * live session only here; a user who only uses the IDE has one only in
- * `state.vscdb`. Checked as a fallback, not primary, matching the reference
- * script's IDE-first precedent and avoiding an extra file read plus a
- * duplicate set of dashboard calls when the IDE session already works.
- */
-export const resolveCursorCliAuthPath = (
-  homeDir: string = NodeOS.homedir(),
-): Effect.Effect<string, never, Path.Path> =>
-  Effect.gen(function* () {
-    const path = yield* Path.Path;
-    return path.join(homeDir, ".config", "cursor", "auth.json");
-  });
-
-interface CursorCliAuthFile {
-  readonly accessToken?: unknown;
-  readonly refreshToken?: unknown;
-}
-
-const parseCursorCliAuthFile = (raw: string): CursorCliAuthFile | null => {
+const parseCursorCliAuthFile = (
+  raw: string,
+): { accessToken?: unknown; refreshToken?: unknown } | null => {
   try {
-    return JSON.parse(raw) as CursorCliAuthFile;
+    return JSON.parse(raw) as { accessToken?: unknown; refreshToken?: unknown };
   } catch {
     return null;
   }
 };
 
-/**
- * Reads `cursor-agent`'s `auth.json`. Unlike `state.vscdb`'s `ItemTable`,
- * this file carries no email/membership fields — both are `null` on the
- * resulting record, and the UI already renders a `null` email as "No
- * account".
- */
 export const readCursorCliAuth = (
   authPath: string,
 ): Effect.Effect<CursorAuthReadResult, never, FileSystem.FileSystem> =>
@@ -246,43 +139,25 @@ export const readCursorCliAuth = (
     if (raw === null) return { status: "missing" as const };
 
     const parsed = parseCursorCliAuthFile(raw);
-    if (parsed === null) return { status: "missing" as const };
-
-    const accessToken = typeof parsed.accessToken === "string" ? parsed.accessToken : null;
+    const accessToken = typeof parsed?.accessToken === "string" ? parsed.accessToken : null;
     if (accessToken === null || accessToken.length === 0) return { status: "missing" as const };
 
     const userId = decodeCursorAccessTokenUserId(accessToken);
     if (userId === null) return { status: "missing" as const };
 
-    const refreshToken = typeof parsed.refreshToken === "string" ? parsed.refreshToken : null;
-
     return {
       status: "ok" as const,
-      record: { accessToken, refreshToken, email: null, membership: null, userId },
+      record: {
+        accessToken,
+        refreshToken: typeof parsed?.refreshToken === "string" ? parsed.refreshToken : null,
+        email: null,
+        userId,
+      },
     };
   });
 
 const cursorCookie = (userId: string, token: string): string =>
   `WorkosCursorSessionToken=${userId}::${token}`;
-
-const dashboardRequest = (url: string, token: string) =>
-  HttpClientRequest.post(url).pipe(
-    HttpClientRequest.bearerToken(token),
-    HttpClientRequest.setHeader("Connect-Protocol-Version", "1"),
-    HttpClientRequest.bodyJsonUnsafe({}),
-  );
-
-const summaryRequest = (userId: string, token: string) =>
-  HttpClientRequest.get(CURSOR_USAGE_SUMMARY_URL).pipe(
-    HttpClientRequest.setHeader("Cookie", cursorCookie(userId, token)),
-  );
-
-interface CursorDashboardFetch {
-  readonly periodStatus: number | null;
-  readonly periodBody: unknown;
-  readonly summaryStatus: number | null;
-  readonly summaryBody: unknown;
-}
 
 const executeCursorJsonRequest = (
   request: HttpClientRequest.HttpClientRequest,
@@ -304,20 +179,32 @@ const executeCursorJsonRequest = (
     );
   });
 
-/** Also fires `GetPlanInfo`, but that response is best-effort only (unused
- * by the current mapping, mirroring `plan`'s minor role in the bash script)
- * so its failure never affects the period/summary-driven result below. */
 const fetchCursorDashboard = (
   token: string,
   userId: string,
-): Effect.Effect<CursorDashboardFetch, never, HttpClient.HttpClient> =>
+): Effect.Effect<
+  {
+    readonly periodStatus: number | null;
+    readonly periodBody: unknown;
+    readonly summaryStatus: number | null;
+    readonly summaryBody: unknown;
+  },
+  never,
+  HttpClient.HttpClient
+> =>
   Effect.gen(function* () {
     const period = yield* executeCursorJsonRequest(
-      dashboardRequest(CURSOR_PERIOD_USAGE_URL, token),
+      HttpClientRequest.post(CURSOR_PERIOD_USAGE_URL).pipe(
+        HttpClientRequest.bearerToken(token),
+        HttpClientRequest.setHeader("Connect-Protocol-Version", "1"),
+        HttpClientRequest.bodyJsonUnsafe({}),
+      ),
     );
-    const summary = yield* executeCursorJsonRequest(summaryRequest(userId, token));
-    yield* executeCursorJsonRequest(dashboardRequest(CURSOR_PLAN_INFO_URL, token));
-
+    const summary = yield* executeCursorJsonRequest(
+      HttpClientRequest.get(CURSOR_USAGE_SUMMARY_URL).pipe(
+        HttpClientRequest.setHeader("Cookie", cursorCookie(userId, token)),
+      ),
+    );
     return {
       periodStatus: period.status,
       periodBody: period.body,
@@ -374,12 +261,16 @@ const pickPath = (source: unknown, keys: ReadonlyArray<string>): unknown => {
   return current;
 };
 
-const formatCursorPercent = (value: number): string => `${Math.round(value * 100) / 100}%`;
+const formatPercent = (value: number): string => `${Math.round(value * 100) / 100}%`;
 
-const formatCursorResetDescription = (resetsAtIso: string | null, nowMs: number): string => {
-  if (resetsAtIso === null) return "Billing cycle";
+const formatResetDescription = (
+  resetsAtIso: string | null,
+  nowMs: number,
+  fallback: string,
+): string => {
+  if (resetsAtIso === null) return fallback;
   const resetMs = Date.parse(resetsAtIso);
-  if (Number.isNaN(resetMs)) return "Billing cycle";
+  if (Number.isNaN(resetMs)) return fallback;
 
   const deltaMs = resetMs - nowMs;
   if (deltaMs <= 0) return "Resets soon";
@@ -387,18 +278,11 @@ const formatCursorResetDescription = (resetsAtIso: string | null, nowMs: number)
   if (days > 0) return `Resets in ${days}d`;
   const hours = Math.floor(deltaMs / 3_600_000);
   if (hours > 0) return `Resets in ${hours}h`;
-  const minutes = Math.max(1, Math.floor(deltaMs / 60_000));
-  return `Resets in ${minutes}m`;
+  return `Resets in ${Math.max(1, Math.floor(deltaMs / 60_000))}m`;
 };
 
-interface CursorUsageBodies {
-  readonly period: unknown;
-  readonly summary: unknown;
-}
-
-/** Same three-slot split as the bash script's `jq` block. */
 export const buildCursorSnapshot = (
-  bodies: CursorUsageBodies,
+  bodies: { readonly period: unknown; readonly summary: unknown },
   email: string | null,
   nowMs: number,
 ): LiveQuotaSnapshot => {
@@ -417,7 +301,7 @@ export const buildCursorSnapshot = (
 
   const resetsAtRaw = pickPath(bodies.summary, ["billingCycleEnd"]);
   const resetsAt = typeof resetsAtRaw === "string" && resetsAtRaw.length > 0 ? resetsAtRaw : null;
-  const resetDescription = formatCursorResetDescription(resetsAt, nowMs);
+  const resetDescription = formatResetDescription(resetsAt, nowMs, "Billing cycle");
 
   return {
     provider: "cursor",
@@ -428,21 +312,21 @@ export const buildCursorSnapshot = (
       windowMinutes: null,
       resetsAt,
       resetDescription,
-      displayValue: formatCursorPercent(totalPercent),
+      displayValue: formatPercent(totalPercent),
     },
     secondary: {
       usedPercent: autoPercent,
       windowMinutes: null,
       resetsAt,
       resetDescription: "Auto + Composer",
-      displayValue: `Auto ${formatCursorPercent(autoPercent)}`,
+      displayValue: `Auto ${formatPercent(autoPercent)}`,
     },
     tertiary: {
       usedPercent: apiPercent,
       windowMinutes: null,
       resetsAt,
       resetDescription: "API / named models",
-      displayValue: `API ${formatCursorPercent(apiPercent)}`,
+      displayValue: `API ${formatPercent(apiPercent)}`,
     },
     updatedAt: DateTime.formatIso(DateTime.makeUnsafe(nowMs)),
   };
@@ -468,10 +352,6 @@ const unauthenticatedResult = (message: string, email: string | null): LiveQuota
   message,
 });
 
-/**
- * Runs the dashboard calls for an already-decoded Cursor session, retrying
- * once via OAuth refresh on a 401 before giving up as `"unauthenticated"`.
- */
 export const computeCursorResult = (
   auth: CursorAuthRecord,
   nowMs: number,
@@ -508,32 +388,18 @@ export const computeCursorResult = (
       return failedResult(`Cursor usage request failed (HTTP ${status}).`, auth.email);
     }
 
-    const snapshot = buildCursorSnapshot(
-      { period: fetchResult.periodBody, summary: fetchResult.summaryBody },
-      auth.email,
-      nowMs,
-    );
-
     return {
       provider: "cursor",
       status: "ok",
       accountEmail: auth.email,
-      snapshot,
+      snapshot: buildCursorSnapshot(
+        { period: fetchResult.periodBody, summary: fetchResult.summaryBody },
+        auth.email,
+        nowMs,
+      ),
     };
   });
 
-interface CursorCacheEntry {
-  readonly result: LiveQuotaResult;
-  readonly fetchedAtMs: number;
-}
-
-/**
- * Builds the Cursor live-quota adapter: a closure with its own 120s TTL
- * cache (matching `CURSOR_USAGE_CACHE_TTL` in the reference script), fully
- * resolved against `HttpClient`/`FileSystem` at construction time so the
- * returned thunk itself needs no ambient context (matches
- * `LiveQuotaAdapter`'s `Effect.Effect<LiveQuotaResult>`, R = never).
- */
 export const make: Effect.Effect<
   LiveQuotaAdapter,
   never,
@@ -542,7 +408,10 @@ export const make: Effect.Effect<
   const httpClient = yield* HttpClient.HttpClient;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const cacheRef = yield* Ref.make<CursorCacheEntry | null>(null);
+  const cacheRef = yield* Ref.make<{
+    readonly result: LiveQuotaResult;
+    readonly fetchedAtMs: number;
+  } | null>(null);
 
   const readSnapshot: LiveQuotaAdapter = () =>
     Effect.gen(function* () {
@@ -552,7 +421,14 @@ export const make: Effect.Effect<
         return cached.result;
       }
 
-      const dbPath = yield* resolveCursorStateDbPath();
+      const dbPath = path.join(
+        NodeOS.homedir(),
+        ".config",
+        "Cursor",
+        "User",
+        "globalStorage",
+        "state.vscdb",
+      );
       const ideAuth = yield* readCursorAuth(dbPath);
 
       const ideResult: LiveQuotaResult =
@@ -562,16 +438,11 @@ export const make: Effect.Effect<
             ? failedResult(ideAuth.message)
             : yield* computeCursorResult(ideAuth.record, nowMs);
 
-      // A real "ok" from the IDE session always wins without touching the
-      // CLI auth file at all; only fall back when the IDE gave us nothing
-      // usable (never signed in, a stale/expired session, or a local read
-      // failure), since the two sessions can go stale independently of each
-      // other.
       const result: LiveQuotaResult =
         ideResult.status === "ok"
           ? ideResult
           : yield* Effect.gen(function* () {
-              const cliAuthPath = yield* resolveCursorCliAuthPath();
+              const cliAuthPath = path.join(NodeOS.homedir(), ".config", "cursor", "auth.json");
               const cliAuth = yield* readCursorCliAuth(cliAuthPath);
               return cliAuth.status === "ok"
                 ? yield* computeCursorResult(cliAuth.record, nowMs)
