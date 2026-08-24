@@ -30,6 +30,7 @@ import { PierreEntryIcon } from "~/components/chat/PierreEntryIcon";
 import { MediaVideoPlayer } from "~/components/media/MediaVideoPlayer";
 import { MediaActions, type MediaActionSource } from "~/components/media/MediaActions";
 import { useRemoteOpenState } from "~/remoteOpen";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
@@ -51,7 +52,12 @@ import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
+import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
 import { useRightPanelStore } from "../../rightPanelStore";
+import {
+  shouldShowFileExplorerBesidePreview,
+  shouldShowFileExplorerToggle,
+} from "./filePreviewLayout";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
@@ -71,7 +77,6 @@ import { projectFileCacheKey, projectFileEditorCacheKey } from "./fileContentRev
 import {
   isMarkdownPreviewFile,
   setMarkdownTaskChecked,
-  shouldShowFileExplorer,
 } from "./filePreviewMode";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 import {
@@ -1002,10 +1007,20 @@ export default function FilePreviewPanel({
     attachment === undefined && !isMedia && !isPdf,
   );
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
-  const showExplorer = shouldShowFileExplorer({
-    relativePath,
-    explorerOpen,
-    attachmentOpen: attachment !== undefined,
+  const isMobileFilePreview = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const filePreviewLayout = isMobileFilePreview ? "mobile" : "desktop";
+  // Attachments and host files never get the explorer, on any layout.
+  const showExplorerBesidePreview =
+    !isHostFile &&
+    shouldShowFileExplorerBesidePreview({
+      explorerOpen,
+      hasOpenFile: relativePath !== null,
+      layout: filePreviewLayout,
+    });
+  const showExplorerToggle = shouldShowFileExplorerToggle({
+    hasOpenFile: relativePath !== null,
+    layout: filePreviewLayout,
+
   });
   // Reading markdown rendered is a preference, not a property of one file. Keeping
   // it on the panel meant a thread switch dropped it and forced source back.
@@ -1203,7 +1218,8 @@ export default function FilePreviewPanel({
               <TooltipPopup>Open file in preview browser</TooltipPopup>
             </Tooltip>
           ) : null}
-          {!isHostFile ? (
+          {showExplorerToggle && !isHostFile ? (
+
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -1341,7 +1357,8 @@ export default function FilePreviewPanel({
             )
           ) : null}
         </div>
-        {showExplorer ? (
+        {showExplorerBesidePreview ? (
+
           <aside
             className={cn(
               "flex min-h-0 shrink-0 bg-background",
