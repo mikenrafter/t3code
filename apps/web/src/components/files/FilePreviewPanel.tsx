@@ -31,6 +31,7 @@ import { OpenInPicker } from "~/components/chat/OpenInPicker";
 import { MediaVideoPlayer } from "~/components/media/MediaVideoPlayer";
 import { MediaActions, type MediaActionSource } from "~/components/media/MediaActions";
 import { useRemoteOpenState } from "~/remoteOpen";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
@@ -54,7 +55,12 @@ import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
+import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
 import { useRightPanelStore } from "../../rightPanelStore";
+import {
+  shouldShowFileExplorerBesidePreview,
+  shouldShowFileExplorerToggle,
+} from "./filePreviewLayout";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
@@ -80,11 +86,7 @@ import SourceFilePreview from "./ReadOnlySourcePreview";
 import { resolveCenteredFileLineScrollTop } from "./fileLineReveal";
 import { DiffCommentAnnotation } from "../diffs/DiffCommentAnnotation";
 import { projectFileCacheKey, projectFileEditorCacheKey } from "./fileContentRevision";
-import {
-  isMarkdownPreviewFile,
-  setMarkdownTaskChecked,
-  shouldShowFileExplorer,
-} from "./filePreviewMode";
+import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 import {
   getOptimisticProjectFileQueryData,
@@ -961,10 +963,19 @@ export default function FilePreviewPanel({
   // Everything preview-related keys off previewPath; a folder has no preview.
   const previewPath = isDirectory ? null : relativePath;
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
-  const showExplorer = shouldShowFileExplorer({
-    relativePath: previewPath,
-    explorerOpen,
-    attachmentOpen: attachment !== undefined,
+  const isMobileFilePreview = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const filePreviewLayout = isMobileFilePreview ? "mobile" : "desktop";
+  // Attachments and host files never get the explorer, on any layout.
+  const showExplorerBesidePreview =
+    !isHostFile &&
+    shouldShowFileExplorerBesidePreview({
+      explorerOpen,
+      hasOpenFile: relativePath !== null,
+      layout: filePreviewLayout,
+    });
+  const showExplorerToggle = shouldShowFileExplorerToggle({
+    hasOpenFile: relativePath !== null,
+    layout: filePreviewLayout,
   });
   // Reading markdown rendered is a preference, not a property of one file. Keeping
   // it on the panel meant a thread switch dropped it and forced source back.
@@ -1168,7 +1179,7 @@ export default function FilePreviewPanel({
               <Globe2 className="size-3.5" />
             </FileSurfaceAction>
           ) : null}
-          {!isHostFile && previewPath !== null ? (
+          {showExplorerToggle && !isHostFile ? (
             <FileSurfaceAction
               label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
               pressed={explorerOpen}
@@ -1295,7 +1306,7 @@ export default function FilePreviewPanel({
             )
           ) : null}
         </div>
-        {showExplorer ? (
+        {showExplorerBesidePreview ? (
           <aside
             className={cn(
               "flex min-h-0 shrink-0 bg-background",
