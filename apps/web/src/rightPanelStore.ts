@@ -12,6 +12,8 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import type { FileBreadcrumb } from "./components/files/filePath";
+import { applyFileBreadcrumbNavigation } from "./components/files/fileBreadcrumbNavigation";
 import { resolveStorage } from "./lib/storage";
 
 export const RIGHT_PANEL_KINDS = [
@@ -37,7 +39,7 @@ export type RightPanelSurface =
       splitDirection?: "horizontal" | "vertical";
     }
   | { id: "diff"; kind: "diff" }
-  | { id: "files"; kind: "files" }
+  | { id: "files"; kind: "files"; focusPath?: string }
   | {
       id: `file:${string}`;
       kind: "file";
@@ -90,6 +92,7 @@ interface RightPanelStoreState {
   ) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
+  navigateFromFileBreadcrumb: (ref: ScopedThreadRef, crumb: FileBreadcrumb) => void;
   openPullRequest: (
     ref: ScopedThreadRef,
     target: { environmentId?: string; projectId: string; repository: string; number: number },
@@ -389,6 +392,12 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
             return upsertSurface(current, pullRequestSurface(target));
           }),
+        })),
+      navigateFromFileBreadcrumb: (ref, crumb) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            applyFileBreadcrumbNavigation(current, crumb),
+          ),
         })),
       openFile: (ref, relativePath, line) =>
         set((state) => ({

@@ -41,6 +41,8 @@ import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
+import { useRightPanelStore } from "../../rightPanelStore";
+import { resolveFileBreadcrumbNavigation } from "./fileBreadcrumbNavigation";
 import FileBrowserPanel from "./FileBrowserPanel";
 import {
   type FileCommentAnnotationEntry,
@@ -76,6 +78,7 @@ interface FilePreviewPanelProps {
   availableEditors: ReadonlyArray<EditorId>;
   revealLine: number | null;
   revealRequestId: number;
+  filesFocusPath?: string | null;
   onOpenFile: (relativePath: string) => void;
   onPendingChange: (relativePath: string, pending: boolean) => void;
 }
@@ -766,9 +769,13 @@ export default function FilePreviewPanel({
   availableEditors,
   revealLine,
   revealRequestId,
+  filesFocusPath = null,
   onOpenFile,
   onPendingChange,
 }: FilePreviewPanelProps) {
+  const navigateFromFileBreadcrumb = useRightPanelStore(
+    (state) => state.navigateFromFileBreadcrumb,
+  );
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -810,6 +817,15 @@ export default function FilePreviewPanel({
   const breadcrumbs = useMemo(
     () => (relativePath ? fileBreadcrumbs(projectName, relativePath) : []),
     [projectName, relativePath],
+  );
+  const handleBreadcrumbClick = useCallback(
+    (crumb: (typeof breadcrumbs)[number]) => {
+      if (resolveFileBreadcrumbNavigation(crumb).kind === "noop") {
+        return;
+      }
+      navigateFromFileBreadcrumb(threadRef, crumb);
+    },
+    [navigateFromFileBreadcrumb, threadRef],
   );
   const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
 
@@ -883,14 +899,17 @@ export default function FilePreviewPanel({
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        <span
-                          className={cn(
-                            "max-w-40 truncate",
-                            crumb.kind === "file"
-                              ? "font-medium text-foreground"
-                              : "text-muted-foreground",
-                          )}
-                        />
+                        crumb.kind === "file" ? (
+                          <span
+                            className={cn("max-w-40 truncate", "font-medium text-foreground")}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            className="max-w-40 truncate text-muted-foreground hover:text-foreground"
+                            onClick={() => handleBreadcrumbClick(crumb)}
+                          />
+                        )
                       }
                     >
                       {crumb.label}
@@ -1079,6 +1098,7 @@ export default function FilePreviewPanel({
               projectName={projectName}
               selectedPath={relativePath}
               selectedPathRevealId={revealRequestId}
+              focusPath={filesFocusPath}
               onOpenFile={onOpenFile}
               {...(relativePath && !isImage ? { onRefreshSelectedFile: file.refresh } : {})}
             />

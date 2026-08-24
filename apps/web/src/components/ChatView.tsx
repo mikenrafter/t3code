@@ -6553,6 +6553,11 @@ function ChatViewContent(props: ChatViewProps) {
           }
           revealLine={activeFileSurface?.revealLine ?? null}
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
+          filesFocusPath={
+            activeRightPanelSurface.kind === "files"
+              ? (activeRightPanelSurface.focusPath ?? "")
+              : null
+          }
           onOpenFile={openFileSurface}
           onPendingChange={handleFilePendingChange}
         />
