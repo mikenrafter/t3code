@@ -9750,6 +9750,7 @@ export default function ChatView(props: ChatViewProps) {
               ? renderedRightPanelSurface.revealRequestId
               : 0
           }
+
           onOpenFile={openFileSurface}
           onPendingChange={handleFilePendingChange}
           selectedFilePending={
