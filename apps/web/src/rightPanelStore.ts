@@ -17,6 +17,8 @@ import {
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import type { FileBreadcrumb } from "./components/files/filePath";
+import { applyFileBreadcrumbNavigation } from "./components/files/fileBreadcrumbNavigation";
 import { resolveStorage } from "./lib/storage";
 
 const RIGHT_PANEL_KINDS = [
@@ -43,7 +45,7 @@ export type RightPanelSurface =
       splitDirection?: "horizontal" | "vertical";
     }
   | { id: "diff"; kind: "diff" }
-  | { id: "files"; kind: "files" }
+  | { id: "files"; kind: "files"; focusPath?: string }
   | {
       id: `file:${string}` | `attachment:${string}`;
       kind: "file";

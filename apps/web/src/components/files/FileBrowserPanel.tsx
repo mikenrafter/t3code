@@ -120,6 +120,7 @@ export default function FileBrowserPanel({
   const syncingSelectionRef = useRef(false);
   const treeSelectionPathRef = useRef<string | null>(null);
   const handledRevealRef = useRef<{ path: string; revealId: number } | null>(null);
+  const handledFocusPathRef = useRef<string | null>(null);
 
   // The tree renders rows in shadow DOM and its anchor rect is unreliable, so
   // capture the right-click position ourselves; contextmenu is a composed
@@ -340,6 +341,57 @@ export default function FileBrowserPanel({
       syncingSelectionRef.current = false;
     });
   }, [entryKinds, model, selectedPath, selectedPathRevealId, treePaths]);
+
+  useEffect(() => {
+    if (focusPath === null) {
+      handledFocusPathRef.current = null;
+      return;
+    }
+    if (handledFocusPathRef.current === focusPath) {
+      return;
+    }
+
+    if (focusPath === "") {
+      handledFocusPathRef.current = focusPath;
+      syncingSelectionRef.current = true;
+      model.closeSearch();
+      for (const path of model.getSelectedPaths()) {
+        model.getItem(path)?.deselect();
+      }
+      queueMicrotask(() => {
+        syncingSelectionRef.current = false;
+      });
+      return;
+    }
+
+    const segments = focusPath.split("/").filter(Boolean);
+    let ancestorPath = "";
+    for (const segment of segments) {
+      ancestorPath = ancestorPath ? `${ancestorPath}/${segment}` : segment;
+      const item = model.getItem(`${ancestorPath}/`) ?? model.getItem(ancestorPath);
+      if (item && "expand" in item) item.expand();
+    }
+
+    const directoryPath = `${focusPath}/`;
+    const directoryItem = model.getItem(directoryPath) ?? model.getItem(focusPath);
+    if (!directoryItem) {
+      return;
+    }
+
+    handledFocusPathRef.current = focusPath;
+    syncingSelectionRef.current = true;
+    model.closeSearch();
+    for (const path of model.getSelectedPaths()) {
+      model.getItem(path)?.deselect();
+    }
+    if ("select" in directoryItem) {
+      directoryItem.select();
+    }
+    model.scrollToPath(directoryPath, { focus: true, offset: "center" });
+    queueMicrotask(() => {
+      syncingSelectionRef.current = false;
+    });
+  }, [focusPath, model, treePaths]);
 
   // Tag tree drags with the composer mention payload. The row is read from
   // the composed event path (the tree's shadow root is open), so this does

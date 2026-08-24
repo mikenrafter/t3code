@@ -51,6 +51,7 @@ import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
+import { useRightPanelStore } from "../../rightPanelStore";
 import FileBrowserPanel from "./FileBrowserPanel";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
@@ -91,6 +92,7 @@ interface FilePreviewPanelProps {
   availableEditors: ReadonlyArray<EditorId>;
   revealLine: number | null;
   revealRequestId: number;
+  filesFocusPath?: string | null;
   onOpenFile: (relativePath: string) => void;
   onPendingChange: (relativePath: string, pending: boolean) => void;
   selectedFilePending: boolean;
@@ -964,11 +966,15 @@ export default function FilePreviewPanel({
   availableEditors,
   revealLine,
   revealRequestId,
+  filesFocusPath = null,
   onOpenFile,
   onPendingChange,
   selectedFilePending,
   workspaceMutationId,
 }: FilePreviewPanelProps) {
+  const navigateFromFileBreadcrumb = useRightPanelStore(
+    (state) => state.navigateFromFileBreadcrumb,
+  );
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -1127,6 +1133,13 @@ export default function FilePreviewPanel({
                   cwd={cwd}
                   environmentId={environmentId}
                   onOpenFile={onOpenFile}
+                  onDirectoryFocus={(path) =>
+                    navigateFromFileBreadcrumb(threadRef, {
+                      label: path.slice(path.lastIndexOf("/") + 1) || projectName,
+                      path,
+                      kind: "directory",
+                    })
+                  }
                   projectName={projectName}
                   relativePath={relativePath}
                   workspaceMutationId={workspaceMutationId}
@@ -1344,6 +1357,7 @@ export default function FilePreviewPanel({
               projectName={projectName}
               selectedPath={relativePath}
               selectedPathRevealId={revealRequestId}
+              focusPath={filesFocusPath}
               onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}
               {...(relativePath && !isMedia && !isPdf
