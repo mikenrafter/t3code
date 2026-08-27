@@ -27,6 +27,10 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import {
+  ProviderInstanceRegistry,
+  type ProviderInstanceRegistryShape,
+} from "../provider/Services/ProviderInstanceRegistry.ts";
 import * as ClaudeLiveQuota from "./liveQuotaProviders/ClaudeLiveQuota.ts";
 import * as CursorLiveQuota from "./liveQuotaProviders/CursorLiveQuota.ts";
 
@@ -48,8 +52,31 @@ export const layerTest = Layer.succeed(
   }),
 );
 
+/**
+ * Cursor's live-quota adapter doesn't resolve its own account email (see
+ * `CursorLiveQuota`'s module doc) — it defers to whatever the *existing*
+ * provider-status check already found for the Cursor instance, the same
+ * value Settings shows. That check already runs on its own polling cadence
+ * to feed `ServerProvider.auth`, so reading its cached snapshot here costs
+ * nothing extra (no new subprocess spawn).
+ */
+export const resolveCursorAccountEmail = (
+  registry: ProviderInstanceRegistryShape,
+): Effect.Effect<string | null> =>
+  Effect.gen(function* () {
+    const instances = yield* registry.listInstances;
+    const cursorInstance = instances.find((instance) => instance.driverKind === "cursor");
+    if (cursorInstance === undefined) return null;
+
+    const snapshot = yield* cursorInstance.snapshot.getSnapshot;
+    return snapshot.auth.status === "authenticated" ? (snapshot.auth.email ?? null) : null;
+  });
+
 export const make = Effect.gen(function* () {
-  const cursorAdapter = yield* CursorLiveQuota.make;
+  const providerInstanceRegistry = yield* ProviderInstanceRegistry;
+  const cursorAdapter = yield* CursorLiveQuota.make(
+    resolveCursorAccountEmail(providerInstanceRegistry),
+  );
   const claudeAdapter = yield* ClaudeLiveQuota.make;
   const adapters: ReadonlyArray<LiveQuotaAdapter> = [cursorAdapter, claudeAdapter];
 

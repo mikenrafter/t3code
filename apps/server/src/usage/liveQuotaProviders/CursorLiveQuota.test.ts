@@ -120,7 +120,6 @@ it.layer(NodeServices.layer)("CursorLiveQuota readCursorAuth", (it) => {
       createCursorStateDb(dbPath, {
         "cursorAuth/accessToken": makeJwt("auth0|user_abc123"),
         "cursorAuth/refreshToken": "refresh-token-value",
-        "cursorAuth/cachedEmail": "person@example.com",
         "cursorAuth/stripeMembershipType": "pro",
       });
 
@@ -130,7 +129,6 @@ it.layer(NodeServices.layer)("CursorLiveQuota readCursorAuth", (it) => {
         record: {
           accessToken: makeJwt("auth0|user_abc123"),
           refreshToken: "refresh-token-value",
-          email: "person@example.com",
           membership: "pro",
           userId: "user_abc123",
         },
@@ -178,7 +176,6 @@ it.live("retries once on SQLITE_BUSY and succeeds on the second attempt", () =>
       record: {
         accessToken: makeJwt("auth0|user_retry"),
         refreshToken: null,
-        email: null,
         membership: null,
         userId: "user_retry",
       },
@@ -207,7 +204,7 @@ it.live("reports 'failed' when SQLITE_BUSY persists through the retry", () =>
 );
 
 describe("buildCursorSnapshot", () => {
-  it("maps period/summary bodies into primary/secondary/tertiary slots", () => {
+  it("maps period/summary bodies into primary (Auto) / secondary (API/named model) slots", () => {
     const snapshot = buildCursorSnapshot(
       {
         period: {
@@ -229,13 +226,12 @@ describe("buildCursorSnapshot", () => {
     expect(snapshot.source).toBe("cursor-dashboard-api");
     expect(snapshot.accountEmail).toBe("person@example.com");
     expect(snapshot.primary).toMatchObject({
-      usedPercent: 42.5,
+      usedPercent: 30,
       windowMinutes: null,
       resetsAt: "2026-09-01T00:00:00.000Z",
-      displayValue: "42.5%",
+      displayValue: "Auto 30%",
     });
-    expect(snapshot.secondary).toMatchObject({ usedPercent: 30, displayValue: "Auto 30%" });
-    expect(snapshot.tertiary).toMatchObject({ usedPercent: 12.5, displayValue: "API 12.5%" });
+    expect(snapshot.secondary).toMatchObject({ usedPercent: 12.5, displayValue: "API 12.5%" });
   });
 
   it("falls back to the summary plan fields when period.planUsage is absent", () => {
@@ -252,9 +248,8 @@ describe("buildCursorSnapshot", () => {
       NOW_MS,
     );
 
-    expect(snapshot.primary.usedPercent).toBe(10);
-    expect(snapshot.secondary?.usedPercent).toBe(5);
-    expect(snapshot.tertiary?.usedPercent).toBe(1);
+    expect(snapshot.primary.usedPercent).toBe(5);
+    expect(snapshot.secondary?.usedPercent).toBe(1);
     expect(snapshot.primary.resetsAt).toBeNull();
     expect(snapshot.primary.resetDescription).toBe("Billing cycle");
   });
@@ -268,7 +263,6 @@ const REFRESH_URL = "https://api2.cursor.sh/oauth/token";
 const cursorAuth = (overrides: Partial<CursorAuthRecord> = {}): CursorAuthRecord => ({
   accessToken: "initial-access-token",
   refreshToken: "initial-refresh-token",
-  email: "person@example.com",
   membership: "pro",
   userId: "user_abc123",
   ...overrides,
@@ -301,11 +295,41 @@ describe("computeCursorResult", () => {
         return Response.json({}, { status: 404 });
       });
 
-      const result = yield* computeCursorResult(cursorAuth(), NOW_MS).pipe(Effect.provide(layer));
+      const result = yield* computeCursorResult(cursorAuth(), "person@example.com", NOW_MS).pipe(
+        Effect.provide(layer),
+      );
       expect(result.status).toBe("ok");
       expect(result.accountEmail).toBe("person@example.com");
-      expect(result.snapshot?.primary.usedPercent).toBe(20);
+      expect(result.snapshot?.primary.usedPercent).toBe(10);
     }),
+  );
+
+  it.effect(
+    "carries the caller-supplied email through regardless of the local credential source",
+    () =>
+      Effect.gen(function* () {
+        // computeCursorResult no longer reads any email off the auth record —
+        // CursorAuthRecord has no email field at all. The account email comes
+        // solely from whatever the caller (LiveQuotaService, backed by the
+        // same provider-status check Settings uses) passes in.
+        const layer = makeHttpLayer((request) => {
+          if (request.url === PERIOD_URL) {
+            return Response.json({ planUsage: { autoPercentUsed: 1, apiPercentUsed: 2 } });
+          }
+          if (request.url === SUMMARY_URL) {
+            return Response.json({ billingCycleEnd: "2026-09-01T00:00:00.000Z" });
+          }
+          return Response.json({});
+        });
+
+        const result = yield* computeCursorResult(
+          cursorAuth(),
+          "someone-else@example.com",
+          NOW_MS,
+        ).pipe(Effect.provide(layer));
+        expect(result.accountEmail).toBe("someone-else@example.com");
+        expect(result.snapshot?.accountEmail).toBe("someone-else@example.com");
+      }),
   );
 
   it.effect("refreshes the token once on 401 and retries successfully", () =>
@@ -318,7 +342,7 @@ describe("computeCursorResult", () => {
         if (request.url === PERIOD_URL) {
           periodCalls += 1;
           if (periodCalls === 1) return Response.json({}, { status: 401 });
-          return Response.json({ planUsage: { totalPercentUsed: 55 } });
+          return Response.json({ planUsage: { autoPercentUsed: 55 } });
         }
         if (request.url === SUMMARY_URL) {
           return Response.json({ billingCycleEnd: "2026-09-01T00:00:00.000Z" });
@@ -329,7 +353,9 @@ describe("computeCursorResult", () => {
         return Response.json({}, { status: 404 });
       });
 
-      const result = yield* computeCursorResult(cursorAuth(), NOW_MS).pipe(Effect.provide(layer));
+      const result = yield* computeCursorResult(cursorAuth(), "person@example.com", NOW_MS).pipe(
+        Effect.provide(layer),
+      );
       expect(periodCalls).toBe(2);
       expect(result.status).toBe("ok");
       expect(result.snapshot?.primary.usedPercent).toBe(55);
@@ -348,7 +374,9 @@ describe("computeCursorResult", () => {
         return Response.json({});
       });
 
-      const result = yield* computeCursorResult(cursorAuth(), NOW_MS).pipe(Effect.provide(layer));
+      const result = yield* computeCursorResult(cursorAuth(), "person@example.com", NOW_MS).pipe(
+        Effect.provide(layer),
+      );
       expect(result.status).toBe("unauthenticated");
       expect(result.accountEmail).toBe("person@example.com");
     }),
@@ -365,9 +393,11 @@ describe("computeCursorResult", () => {
         return Response.json({});
       });
 
-      const result = yield* computeCursorResult(cursorAuth({ refreshToken: null }), NOW_MS).pipe(
-        Effect.provide(layer),
-      );
+      const result = yield* computeCursorResult(
+        cursorAuth({ refreshToken: null }),
+        "person@example.com",
+        NOW_MS,
+      ).pipe(Effect.provide(layer));
       expect(refreshCalls).toEqual([]);
       expect(result.status).toBe("unauthenticated");
     }),
@@ -384,7 +414,9 @@ describe("computeCursorResult", () => {
           return Response.json({});
         });
 
-        const result = yield* computeCursorResult(cursorAuth(), NOW_MS).pipe(Effect.provide(layer));
+        const result = yield* computeCursorResult(cursorAuth(), "person@example.com", NOW_MS).pipe(
+          Effect.provide(layer),
+        );
         expect(result.status).toBe("failed");
       }),
   );

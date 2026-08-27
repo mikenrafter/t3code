@@ -95,19 +95,16 @@ it.effect("decodes a LiveQuotaSnapshot with only the required primary slot", () 
     assert.strictEqual(parsed.provider, "cursor");
     assert.strictEqual(parsed.accountEmail, null);
     assert.strictEqual(parsed.secondary, undefined);
-    assert.strictEqual(parsed.tertiary, undefined);
   }),
 );
 
-it.effect("decodes a LiveQuotaSnapshot with secondary and tertiary slots", () =>
+it.effect("decodes a LiveQuotaSnapshot with a secondary slot", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeLiveQuotaSnapshot({
       ...validSnapshot,
       provider: "cursor",
-      tertiary: validSlot,
     });
     assert.ok(parsed.secondary);
-    assert.ok(parsed.tertiary);
   }),
 );
 

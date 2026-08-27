@@ -13,6 +13,13 @@
  * deliberate, local-only tradeoff — see the Nix patch header this file ships
  * under for the full rationale.
  *
+ * Account email is a deliberate exception to that boundary: this module
+ * never reads it off local credential files (the CLI's `auth.json` doesn't
+ * even carry one). Instead the caller (`LiveQuotaService`) passes in
+ * whatever email the *existing* provider-status check already resolved for
+ * Cursor — the same value Settings shows — so there's exactly one source of
+ * truth for "whose account is this" instead of two that can disagree.
+ *
  * @module CursorLiveQuota
  */
 import * as NodeOS from "node:os";
@@ -45,7 +52,6 @@ const CURSOR_OAUTH_TOKEN_URL = "https://api2.cursor.sh/oauth/token";
 const CURSOR_AUTH_ITEM_KEYS = {
   accessToken: "cursorAuth/accessToken",
   refreshToken: "cursorAuth/refreshToken",
-  email: "cursorAuth/cachedEmail",
   membership: "cursorAuth/stripeMembershipType",
 } as const;
 
@@ -88,7 +94,6 @@ export const decodeCursorAccessTokenUserId = (accessToken: string): string | nul
 export interface CursorAuthRecord {
   readonly accessToken: string;
   readonly refreshToken: string | null;
-  readonly email: string | null;
   readonly membership: string | null;
   readonly userId: string;
 }
@@ -107,7 +112,6 @@ const defaultOpenCursorStateDb = (dbPath: string): NodeSqlite.DatabaseSync =>
 interface CursorAuthRawRows {
   readonly accessToken: string | null;
   readonly refreshToken: string | null;
-  readonly email: string | null;
   readonly membership: string | null;
 }
 
@@ -125,7 +129,6 @@ const readCursorAuthRows = (db: NodeSqlite.DatabaseSync): CursorAuthRawRows => {
   return {
     accessToken: get(CURSOR_AUTH_ITEM_KEYS.accessToken),
     refreshToken: get(CURSOR_AUTH_ITEM_KEYS.refreshToken),
-    email: get(CURSOR_AUTH_ITEM_KEYS.email),
     membership: get(CURSOR_AUTH_ITEM_KEYS.membership),
   };
 };
@@ -193,7 +196,6 @@ export const readCursorAuth = (
       record: {
         accessToken: rows.accessToken,
         refreshToken: rows.refreshToken,
-        email: rows.email,
         membership: rows.membership,
         userId,
       },
@@ -231,9 +233,9 @@ const parseCursorCliAuthFile = (raw: string): CursorCliAuthFile | null => {
 
 /**
  * Reads `cursor-agent`'s `auth.json`. Unlike `state.vscdb`'s `ItemTable`,
- * this file carries no email/membership fields — both are `null` on the
- * resulting record, and the UI already renders a `null` email as "No
- * account".
+ * this file carries no membership field — `null` on the resulting record.
+ * (It has no email field either, but that no longer matters: this module
+ * doesn't read email off any local credential file — see the module doc.)
  */
 export const readCursorCliAuth = (
   authPath: string,
@@ -258,7 +260,7 @@ export const readCursorCliAuth = (
 
     return {
       status: "ok" as const,
-      record: { accessToken, refreshToken, email: null, membership: null, userId },
+      record: { accessToken, refreshToken, membership: null, userId },
     };
   });
 
@@ -396,7 +398,14 @@ interface CursorUsageBodies {
   readonly summary: unknown;
 }
 
-/** Same three-slot split as the bash script's `jq` block. */
+/**
+ * Cursor's own dashboard frames usage as two separate limits — "included
+ * total usage" (Auto-mode / composer models) and "included API usage"
+ * (named/API models) — rather than the blended `totalPercentUsed` figure
+ * the API also returns. `primary`/`secondary` mirror that framing so a
+ * spike in one bucket (e.g. heavy named-model use) isn't hidden behind a
+ * low blended average.
+ */
 export const buildCursorSnapshot = (
   bodies: CursorUsageBodies,
   email: string | null,
@@ -405,9 +414,6 @@ export const buildCursorSnapshot = (
   const planUsage = pickPath(bodies.period, ["planUsage"]);
   const summaryPlan = pickPath(bodies.summary, ["individualUsage", "plan"]);
 
-  const totalPercent = numberOr(
-    pickPath(planUsage, ["totalPercentUsed"]) ?? pickPath(summaryPlan, ["totalPercentUsed"]),
-  );
   const autoPercent = numberOr(
     pickPath(planUsage, ["autoPercentUsed"]) ?? pickPath(summaryPlan, ["autoPercentUsed"]),
   );
@@ -424,20 +430,13 @@ export const buildCursorSnapshot = (
     source: "cursor-dashboard-api",
     accountEmail: email,
     primary: {
-      usedPercent: totalPercent,
-      windowMinutes: null,
-      resetsAt,
-      resetDescription,
-      displayValue: formatCursorPercent(totalPercent),
-    },
-    secondary: {
       usedPercent: autoPercent,
       windowMinutes: null,
       resetsAt,
-      resetDescription: "Auto + Composer",
+      resetDescription,
       displayValue: `Auto ${formatCursorPercent(autoPercent)}`,
     },
-    tertiary: {
+    secondary: {
       usedPercent: apiPercent,
       windowMinutes: null,
       resetsAt,
@@ -471,9 +470,13 @@ const unauthenticatedResult = (message: string, email: string | null): LiveQuota
 /**
  * Runs the dashboard calls for an already-decoded Cursor session, retrying
  * once via OAuth refresh on a 401 before giving up as `"unauthenticated"`.
+ *
+ * `email` is passed in by the caller rather than read off `auth` — this
+ * module never resolves account email itself, see the module doc.
  */
 export const computeCursorResult = (
   auth: CursorAuthRecord,
+  email: string | null,
   nowMs: number,
 ): Effect.Effect<LiveQuotaResult, never, HttpClient.HttpClient> =>
   Effect.gen(function* () {
@@ -487,17 +490,14 @@ export const computeCursorResult = (
       if (newToken === null) {
         return unauthenticatedResult(
           "Cursor session expired and refresh failed. Sign into Cursor and retry.",
-          auth.email,
+          email,
         );
       }
 
       token = newToken;
       fetchResult = yield* fetchCursorDashboard(token, auth.userId);
       if (fetchResult.periodStatus === 401 || fetchResult.summaryStatus === 401) {
-        return unauthenticatedResult(
-          "Cursor session expired. Sign into Cursor and retry.",
-          auth.email,
-        );
+        return unauthenticatedResult("Cursor session expired. Sign into Cursor and retry.", email);
       }
     }
 
@@ -505,19 +505,19 @@ export const computeCursorResult = (
     const summaryOk = fetchResult.summaryStatus === 200;
     if (!periodOk && !summaryOk) {
       const status = fetchResult.periodStatus ?? fetchResult.summaryStatus ?? "unknown";
-      return failedResult(`Cursor usage request failed (HTTP ${status}).`, auth.email);
+      return failedResult(`Cursor usage request failed (HTTP ${status}).`, email);
     }
 
     const snapshot = buildCursorSnapshot(
       { period: fetchResult.periodBody, summary: fetchResult.summaryBody },
-      auth.email,
+      email,
       nowMs,
     );
 
     return {
       provider: "cursor",
       status: "ok",
-      accountEmail: auth.email,
+      accountEmail: email,
       snapshot,
     };
   });
@@ -533,58 +533,66 @@ interface CursorCacheEntry {
  * resolved against `HttpClient`/`FileSystem` at construction time so the
  * returned thunk itself needs no ambient context (matches
  * `LiveQuotaAdapter`'s `Effect.Effect<LiveQuotaResult>`, R = never).
+ *
+ * `resolveAccountEmail` is supplied by the caller (`LiveQuotaService`) and
+ * re-read on every cache miss — see the module doc for why this module
+ * doesn't resolve email itself.
  */
-export const make: Effect.Effect<
+export const make = (
+  resolveAccountEmail: Effect.Effect<string | null>,
+): Effect.Effect<
   LiveQuotaAdapter,
   never,
   HttpClient.HttpClient | FileSystem.FileSystem | Path.Path
-> = Effect.gen(function* () {
-  const httpClient = yield* HttpClient.HttpClient;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const cacheRef = yield* Ref.make<CursorCacheEntry | null>(null);
+> =>
+  Effect.gen(function* () {
+    const httpClient = yield* HttpClient.HttpClient;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const cacheRef = yield* Ref.make<CursorCacheEntry | null>(null);
 
-  const readSnapshot: LiveQuotaAdapter = () =>
-    Effect.gen(function* () {
-      const nowMs = yield* Clock.currentTimeMillis;
-      const cached = yield* Ref.get(cacheRef);
-      if (cached !== null && nowMs - cached.fetchedAtMs < CURSOR_CACHE_TTL_MS) {
-        return cached.result;
-      }
+    const readSnapshot: LiveQuotaAdapter = () =>
+      Effect.gen(function* () {
+        const nowMs = yield* Clock.currentTimeMillis;
+        const cached = yield* Ref.get(cacheRef);
+        if (cached !== null && nowMs - cached.fetchedAtMs < CURSOR_CACHE_TTL_MS) {
+          return cached.result;
+        }
 
-      const dbPath = yield* resolveCursorStateDbPath();
-      const ideAuth = yield* readCursorAuth(dbPath);
+        const email = yield* resolveAccountEmail;
+        const dbPath = yield* resolveCursorStateDbPath();
+        const ideAuth = yield* readCursorAuth(dbPath);
 
-      const ideResult: LiveQuotaResult =
-        ideAuth.status === "missing"
-          ? missingResult()
-          : ideAuth.status === "failed"
-            ? failedResult(ideAuth.message)
-            : yield* computeCursorResult(ideAuth.record, nowMs);
+        const ideResult: LiveQuotaResult =
+          ideAuth.status === "missing"
+            ? missingResult()
+            : ideAuth.status === "failed"
+              ? failedResult(ideAuth.message, email)
+              : yield* computeCursorResult(ideAuth.record, email, nowMs);
 
-      // A real "ok" from the IDE session always wins without touching the
-      // CLI auth file at all; only fall back when the IDE gave us nothing
-      // usable (never signed in, a stale/expired session, or a local read
-      // failure), since the two sessions can go stale independently of each
-      // other.
-      const result: LiveQuotaResult =
-        ideResult.status === "ok"
-          ? ideResult
-          : yield* Effect.gen(function* () {
-              const cliAuthPath = yield* resolveCursorCliAuthPath();
-              const cliAuth = yield* readCursorCliAuth(cliAuthPath);
-              return cliAuth.status === "ok"
-                ? yield* computeCursorResult(cliAuth.record, nowMs)
-                : ideResult;
-            });
+        // A real "ok" from the IDE session always wins without touching the
+        // CLI auth file at all; only fall back when the IDE gave us nothing
+        // usable (never signed in, a stale/expired session, or a local read
+        // failure), since the two sessions can go stale independently of each
+        // other.
+        const result: LiveQuotaResult =
+          ideResult.status === "ok"
+            ? ideResult
+            : yield* Effect.gen(function* () {
+                const cliAuthPath = yield* resolveCursorCliAuthPath();
+                const cliAuth = yield* readCursorCliAuth(cliAuthPath);
+                return cliAuth.status === "ok"
+                  ? yield* computeCursorResult(cliAuth.record, email, nowMs)
+                  : ideResult;
+              });
 
-      yield* Ref.set(cacheRef, { result, fetchedAtMs: nowMs });
-      return result;
-    }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(HttpClient.HttpClient, httpClient),
-      Effect.provideService(Path.Path, path),
-    );
+        yield* Ref.set(cacheRef, { result, fetchedAtMs: nowMs });
+        return result;
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+        Effect.provideService(Path.Path, path),
+      );
 
-  return readSnapshot;
-});
+    return readSnapshot;
+  });

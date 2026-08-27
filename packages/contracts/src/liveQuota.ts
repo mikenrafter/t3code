@@ -8,11 +8,10 @@
  * 5h/7d rate-limit window). Cursor's local transcripts carry no token/usage
  * data at all, so its usage can only ever be observed this way.
  *
- * Mirrors the JSON shape the DMS `aiOverviewControl` plugin's
- * `get-provider-wrapper` contract already uses
- * (`usage.primary/secondary/tertiary`, each with `usedPercent`,
- * `windowMinutes`, `resetsAt`, `resetDescription`, `displayValue`) rather than
- * inventing a new shape.
+ * Loosely inspired by the DMS `aiOverviewControl` plugin's
+ * `get-provider-wrapper` contract's `usage.primary/secondary` shape (each
+ * slot has `usedPercent`, `windowMinutes`, `resetsAt`, `resetDescription`,
+ * `displayValue`) rather than inventing a new one.
  *
  * @module liveQuota
  */
@@ -45,9 +44,8 @@ export type LiveQuotaSlot = typeof LiveQuotaSlot.Type;
 /**
  * A successful point-in-time read from one provider's live quota API.
  *
- * `secondary`/`tertiary` are optional because not every provider has a
- * three-way split (Claude only ever reports two rolling windows; Cursor
- * reports up to three meters).
+ * `secondary` is optional because not every provider has a two-way split
+ * (a future single-meter provider could report `primary` alone).
  */
 export const LiveQuotaSnapshot = Schema.Struct({
   provider: LiveQuotaProviderKind,
@@ -56,7 +54,6 @@ export const LiveQuotaSnapshot = Schema.Struct({
   accountEmail: Schema.NullOr(TrimmedNonEmptyString),
   primary: LiveQuotaSlot,
   secondary: Schema.optional(LiveQuotaSlot),
-  tertiary: Schema.optional(LiveQuotaSlot),
   updatedAt: Schema.String,
 });
 export type LiveQuotaSnapshot = typeof LiveQuotaSnapshot.Type;
