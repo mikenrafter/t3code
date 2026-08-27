@@ -479,6 +479,15 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
   ),
   Layer.provideMerge(ProviderRegistryLive),
+  // `LiveQuotaService` reads `ProviderInstanceRegistry` directly (to resolve
+  // per-instance credentials for dashboard/rate-limit reads). It must be
+  // merged in before `ProviderInstanceRegistryHydrationLive` below so that
+  // step's output can satisfy this leaked requirement — `Layer.provideMerge`
+  // only feeds a step's *own* output forward to satisfy the accumulator's
+  // outstanding requirements, never the other way around, so providing it
+  // any later (as it previously was, from `RuntimeDependenciesLive`) leaves
+  // `ProviderInstanceRegistry` unresolved all the way out to `bin.ts`.
+  Layer.provideMerge(LiveQuotaLayerLive),
   // The instance registry is the new routing keystone — text generation,
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
@@ -526,7 +535,6 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
   Layer.provideMerge(UsageLayerLive),
-  Layer.provideMerge(LiveQuotaLayerLive),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),
