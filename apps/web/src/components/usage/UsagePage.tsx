@@ -98,6 +98,7 @@ export function UsagePage() {
     } else {
       setWindowSelection({ days: windowDays, window: nextWindow });
     }
+    refreshLiveQuota();
   };
   const windowLabel =
     isPast24Hours && window.sinceTime !== undefined && window.untilTime !== undefined
