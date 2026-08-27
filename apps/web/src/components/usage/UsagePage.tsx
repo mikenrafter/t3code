@@ -199,6 +199,7 @@ const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
       refreshingRef.current = false;
       setIsRefreshing(false);
     });
+    refreshLiveQuota();
   };
   const windowLabel =
     isPast24Hours && window.sinceTime !== undefined && window.untilTime !== undefined
