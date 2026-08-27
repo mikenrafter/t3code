@@ -1,7 +1,8 @@
-import type { LiveQuotaProviderKind, LiveQuotaResult } from "@t3tools/contracts";
+import type { LiveQuotaProviderKind, LiveQuotaResult, LiveQuotaSlot } from "@t3tools/contracts";
 import { RefreshCwIcon } from "lucide-react";
 
 import { cn } from "../../lib/utils";
+import { RedactedSensitiveText } from "../settings/RedactedSensitiveText";
 import { ClaudeAI, CursorIcon, type Icon } from "../Icons";
 
 const PROVIDER_ICON: Record<LiveQuotaProviderKind, Icon> = {
@@ -76,8 +77,18 @@ function LiveQuotaCard({
         </span>
         {/* Always shown, even when null, so a multi-account render (two cards
             for the same provider) stays legible instead of looking like a
-            rendering glitch. */}
-        <span className="text-xs text-muted-foreground">{result.accountEmail ?? "No account"}</span>
+            rendering glitch. Redacted by default since it's a real account
+            email (PII) rendered directly in the UI. */}
+        {result.accountEmail ? (
+          <RedactedSensitiveText
+            value={result.accountEmail}
+            ariaLabel="Toggle account email visibility"
+            revealTooltip="Click to reveal email"
+            hideTooltip="Click to hide email"
+          />
+        ) : (
+          <span className="text-xs text-muted-foreground">No account</span>
+        )}
       </div>
       <LiveQuotaCardBody result={result} onRetry={onRetry} />
     </div>
@@ -119,30 +130,56 @@ function LiveQuotaCardBody({
     );
   }
 
-  const { primary } = result.snapshot;
-  const percent = Math.min(100, Math.max(0, primary.usedPercent));
+  const { primary, secondary } = result.snapshot;
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-2">
+      <LiveQuotaMeter slot={primary} size="primary" />
+      {secondary ? <LiveQuotaMeter slot={secondary} size="secondary" /> : null}
+    </div>
+  );
+}
+
+function LiveQuotaMeter({
+  slot,
+  size,
+}: {
+  readonly slot: LiveQuotaSlot;
+  readonly size: "primary" | "secondary";
+}) {
+  const percent = Math.min(100, Math.max(0, slot.usedPercent));
+
+  return (
+    <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-2xl font-semibold text-foreground tabular-nums">
-          {primary.displayValue}
+        <span
+          className={cn(
+            "font-semibold text-foreground tabular-nums",
+            size === "primary" ? "text-2xl" : "text-sm",
+          )}
+        >
+          {slot.displayValue}
         </span>
-        {primary.windowMinutes !== null ? (
+        {slot.windowMinutes !== null ? (
           <span
             className={cn(
               "shrink-0 rounded-full border border-border px-1.5 py-0.5 text-[10px]",
               "text-muted-foreground uppercase",
             )}
           >
-            rolling {formatQuotaWindow(primary.windowMinutes)}
+            rolling {formatQuotaWindow(slot.windowMinutes)}
           </span>
         ) : null}
       </div>
-      <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+      <div
+        className={cn(
+          "w-full overflow-hidden rounded-full bg-muted",
+          size === "primary" ? "h-1" : "h-0.5",
+        )}
+      >
         <div className="h-full bg-foreground" style={{ width: `${percent}%` }} />
       </div>
-      <span className="text-xs text-muted-foreground">{primary.resetDescription}</span>
+      <span className="text-xs text-muted-foreground">{slot.resetDescription}</span>
     </div>
   );
 }

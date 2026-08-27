@@ -2,6 +2,13 @@
  * Cursor live-quota adapter. Reads Cursor IDE `state.vscdb` (or `cursor-agent`
  * auth.json as fallback) and calls Cursor dashboard usage APIs.
  *
+ * Account email is a deliberate exception to that boundary: this module
+ * never reads it off local credential files (the CLI's `auth.json` doesn't
+ * even carry one). Instead the caller (`LiveQuotaService`) passes in
+ * whatever email the *existing* provider-status check already resolved for
+ * Cursor — the same value Settings shows — so there's exactly one source of
+ * truth for "whose account is this" instead of two that can disagree.
+ *
  * @module CursorLiveQuota
  */
 import * as NodeOS from "node:os";
@@ -28,13 +35,11 @@ const CURSOR_OAUTH_TOKEN_URL = "https://api2.cursor.sh/oauth/token";
 const CURSOR_AUTH_KEYS = {
   accessToken: "cursorAuth/accessToken",
   refreshToken: "cursorAuth/refreshToken",
-  email: "cursorAuth/cachedEmail",
 } as const;
 
 export interface CursorAuthRecord {
   readonly accessToken: string;
   readonly refreshToken: string | null;
-  readonly email: string | null;
   readonly userId: string;
 }
 
@@ -70,7 +75,6 @@ const readCursorAuthRows = (db: NodeSqlite.DatabaseSync) => {
   return {
     accessToken: get(CURSOR_AUTH_KEYS.accessToken),
     refreshToken: get(CURSOR_AUTH_KEYS.refreshToken),
-    email: get(CURSOR_AUTH_KEYS.email),
   };
 };
 
@@ -112,7 +116,6 @@ export const readCursorAuth = (
       record: {
         accessToken: rows.accessToken,
         refreshToken: rows.refreshToken,
-        email: rows.email,
         userId,
       },
     };
@@ -150,7 +153,6 @@ export const readCursorCliAuth = (
       record: {
         accessToken,
         refreshToken: typeof parsed?.refreshToken === "string" ? parsed.refreshToken : null,
-        email: null,
         userId,
       },
     };
@@ -289,9 +291,6 @@ export const buildCursorSnapshot = (
   const planUsage = pickPath(bodies.period, ["planUsage"]);
   const summaryPlan = pickPath(bodies.summary, ["individualUsage", "plan"]);
 
-  const totalPercent = numberOr(
-    pickPath(planUsage, ["totalPercentUsed"]) ?? pickPath(summaryPlan, ["totalPercentUsed"]),
-  );
   const autoPercent = numberOr(
     pickPath(planUsage, ["autoPercentUsed"]) ?? pickPath(summaryPlan, ["autoPercentUsed"]),
   );
@@ -308,20 +307,13 @@ export const buildCursorSnapshot = (
     source: "cursor-dashboard-api",
     accountEmail: email,
     primary: {
-      usedPercent: totalPercent,
-      windowMinutes: null,
-      resetsAt,
-      resetDescription,
-      displayValue: formatPercent(totalPercent),
-    },
-    secondary: {
       usedPercent: autoPercent,
       windowMinutes: null,
       resetsAt,
-      resetDescription: "Auto + Composer",
+      resetDescription,
       displayValue: `Auto ${formatPercent(autoPercent)}`,
     },
-    tertiary: {
+    secondary: {
       usedPercent: apiPercent,
       windowMinutes: null,
       resetsAt,
@@ -352,8 +344,16 @@ const unauthenticatedResult = (message: string, email: string | null): LiveQuota
   message,
 });
 
+/**
+ * Runs the dashboard calls for an already-decoded Cursor session, retrying
+ * once via OAuth refresh on a 401 before giving up as `"unauthenticated"`.
+ *
+ * `email` is passed in by the caller rather than read off `auth` — this
+ * module never resolves account email itself, see the module doc.
+ */
 export const computeCursorResult = (
   auth: CursorAuthRecord,
+  email: string | null,
   nowMs: number,
 ): Effect.Effect<LiveQuotaResult, never, HttpClient.HttpClient> =>
   Effect.gen(function* () {
@@ -367,17 +367,14 @@ export const computeCursorResult = (
       if (newToken === null) {
         return unauthenticatedResult(
           "Cursor session expired and refresh failed. Sign into Cursor and retry.",
-          auth.email,
+          email,
         );
       }
 
       token = newToken;
       fetchResult = yield* fetchCursorDashboard(token, auth.userId);
       if (fetchResult.periodStatus === 401 || fetchResult.summaryStatus === 401) {
-        return unauthenticatedResult(
-          "Cursor session expired. Sign into Cursor and retry.",
-          auth.email,
-        );
+        return unauthenticatedResult("Cursor session expired. Sign into Cursor and retry.", email);
       }
     }
 
@@ -385,77 +382,86 @@ export const computeCursorResult = (
     const summaryOk = fetchResult.summaryStatus === 200;
     if (!periodOk && !summaryOk) {
       const status = fetchResult.periodStatus ?? fetchResult.summaryStatus ?? "unknown";
-      return failedResult(`Cursor usage request failed (HTTP ${status}).`, auth.email);
+      return failedResult(`Cursor usage request failed (HTTP ${status}).`, email);
     }
 
     return {
       provider: "cursor",
       status: "ok",
-      accountEmail: auth.email,
+      accountEmail: email,
       snapshot: buildCursorSnapshot(
         { period: fetchResult.periodBody, summary: fetchResult.summaryBody },
-        auth.email,
+        email,
         nowMs,
       ),
     };
   });
 
-export const make: Effect.Effect<
+/**
+ * `resolveAccountEmail` is supplied by the caller (`LiveQuotaService`) and
+ * re-read on every cache miss — see the module doc for why this module
+ * doesn't resolve email itself.
+ */
+export const make = (
+  resolveAccountEmail: Effect.Effect<string | null>,
+): Effect.Effect<
   LiveQuotaAdapter,
   never,
   HttpClient.HttpClient | FileSystem.FileSystem | Path.Path
-> = Effect.gen(function* () {
-  const httpClient = yield* HttpClient.HttpClient;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const cacheRef = yield* Ref.make<{
-    readonly result: LiveQuotaResult;
-    readonly fetchedAtMs: number;
-  } | null>(null);
+> =>
+  Effect.gen(function* () {
+    const httpClient = yield* HttpClient.HttpClient;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const cacheRef = yield* Ref.make<{
+      readonly result: LiveQuotaResult;
+      readonly fetchedAtMs: number;
+    } | null>(null);
 
-  const readSnapshot: LiveQuotaAdapter = () =>
-    Effect.gen(function* () {
-      const nowMs = yield* Clock.currentTimeMillis;
-      const cached = yield* Ref.get(cacheRef);
-      if (cached !== null && nowMs - cached.fetchedAtMs < CURSOR_CACHE_TTL_MS) {
-        return cached.result;
-      }
+    const readSnapshot: LiveQuotaAdapter = () =>
+      Effect.gen(function* () {
+        const nowMs = yield* Clock.currentTimeMillis;
+        const cached = yield* Ref.get(cacheRef);
+        if (cached !== null && nowMs - cached.fetchedAtMs < CURSOR_CACHE_TTL_MS) {
+          return cached.result;
+        }
 
-      const dbPath = path.join(
-        NodeOS.homedir(),
-        ".config",
-        "Cursor",
-        "User",
-        "globalStorage",
-        "state.vscdb",
+        const email = yield* resolveAccountEmail;
+        const dbPath = path.join(
+          NodeOS.homedir(),
+          ".config",
+          "Cursor",
+          "User",
+          "globalStorage",
+          "state.vscdb",
+        );
+        const ideAuth = yield* readCursorAuth(dbPath);
+
+        const ideResult: LiveQuotaResult =
+          ideAuth.status === "missing"
+            ? missingResult()
+            : ideAuth.status === "failed"
+              ? failedResult(ideAuth.message, email)
+              : yield* computeCursorResult(ideAuth.record, email, nowMs);
+
+        const result: LiveQuotaResult =
+          ideResult.status === "ok"
+            ? ideResult
+            : yield* Effect.gen(function* () {
+                const cliAuthPath = path.join(NodeOS.homedir(), ".config", "cursor", "auth.json");
+                const cliAuth = yield* readCursorCliAuth(cliAuthPath);
+                return cliAuth.status === "ok"
+                  ? yield* computeCursorResult(cliAuth.record, email, nowMs)
+                  : ideResult;
+              });
+
+        yield* Ref.set(cacheRef, { result, fetchedAtMs: nowMs });
+        return result;
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+        Effect.provideService(Path.Path, path),
       );
-      const ideAuth = yield* readCursorAuth(dbPath);
 
-      const ideResult: LiveQuotaResult =
-        ideAuth.status === "missing"
-          ? missingResult()
-          : ideAuth.status === "failed"
-            ? failedResult(ideAuth.message)
-            : yield* computeCursorResult(ideAuth.record, nowMs);
-
-      const result: LiveQuotaResult =
-        ideResult.status === "ok"
-          ? ideResult
-          : yield* Effect.gen(function* () {
-              const cliAuthPath = path.join(NodeOS.homedir(), ".config", "cursor", "auth.json");
-              const cliAuth = yield* readCursorCliAuth(cliAuthPath);
-              return cliAuth.status === "ok"
-                ? yield* computeCursorResult(cliAuth.record, nowMs)
-                : ideResult;
-            });
-
-      yield* Ref.set(cacheRef, { result, fetchedAtMs: nowMs });
-      return result;
-    }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(HttpClient.HttpClient, httpClient),
-      Effect.provideService(Path.Path, path),
-    );
-
-  return readSnapshot;
-});
+    return readSnapshot;
+  });
