@@ -21,6 +21,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import GitActionsControl from "../GitActionsControl";
@@ -33,7 +34,10 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { OpenInPicker } from "./OpenInPicker";
+import { ChatHeaderMobileMenuToggle } from "./ChatHeaderMobileMenu";
 import { useRemoteOpenState, type RemoteOpenMode } from "../../remoteOpen";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
+import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
@@ -67,6 +71,8 @@ interface ChatHeaderProps {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
+  /** Terminal drawer toggle, rendered in the mobile header row. */
+  mobilePanelLayoutControls?: ReactNode;
   gitCwd: string | null;
   readonly onOpenPullRequest?: ((number: number) => void) | undefined;
   onNewThreadInProject: () => void;
@@ -136,6 +142,7 @@ export const ChatHeader = memo(function ChatHeader({
   keybindings,
   availableEditors,
   rightPanelOpen,
+  mobilePanelLayoutControls,
   gitCwd,
   onOpenPullRequest,
   onNewThreadInProject,
@@ -194,6 +201,11 @@ export const ChatHeader = memo(function ChatHeader({
     [actionsContainer, actionsCollapsed],
   );
   if (!actionsCollapsed && actionsOpen) setActionsOpen(false);
+  const isMobileLayout = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const [mobileMenuExpanded, setMobileMenuExpanded] = useState(false);
+  useEffect(() => {
+    setMobileMenuExpanded(false);
+  }, [activeThreadId]);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const activeProjectName = activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -317,7 +329,13 @@ export const ChatHeader = memo(function ChatHeader({
       if (renamingTitle !== null) return;
       // The right-side controls (git, scripts, open-in) keep their own
       // behavior; only the breadcrumb area opens the thread menu.
-      if ((event.target as HTMLElement).closest("[data-chat-header-actions]")) return;
+      if (
+        (event.target as HTMLElement).closest(
+          "[data-chat-header-actions], [data-chat-header-mobile-menu]",
+        )
+      ) {
+        return;
+      }
       if (!isServerThread && onOpenProjectSettings === undefined) return;
       cancelPendingTitleMenu();
       event.preventDefault();
@@ -395,135 +413,172 @@ export const ChatHeader = memo(function ChatHeader({
       )}
     </>
   );
-  return (
-    <div
-      className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
-      onContextMenu={handleHeaderContextMenu}
+  const breadcrumb = (
+    <WorkspaceBreadcrumb
+      ariaLabel="Thread breadcrumb"
+      className="flex-1 overflow-clip [overflow-clip-margin:2px]"
     >
-      <WorkspaceBreadcrumb
-        ariaLabel="Thread breadcrumb"
-        className="flex-1 overflow-clip [overflow-clip-margin:2px]"
-      >
-        {/* The project always leads the header: knowing which project a
-            thread lives in is priority zero, and the thread title alone
-            doesn't answer it. */}
-        {activeProject ? (
-          <>
-            <WorkspaceBreadcrumbItem className="shrink">
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <button
-                      type="button"
-                      aria-label={`New thread in ${activeProjectName}`}
-                      onClick={onNewThreadInProject}
-                      className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                    />
-                  }
-                >
-                  <ProjectFavicon project={activeProject} className="size-3.5" />
-                  <WorkspaceBreadcrumbText className="max-w-40">
-                    {activeProjectName}
-                  </WorkspaceBreadcrumbText>
-                </TooltipTrigger>
-                <TooltipPopup side="top">New thread in {activeProjectName}</TooltipPopup>
-              </Tooltip>
-            </WorkspaceBreadcrumbItem>
-            <WorkspaceBreadcrumbSeparator>
-              <WorkspaceBreadcrumbText>/</WorkspaceBreadcrumbText>
-            </WorkspaceBreadcrumbSeparator>
-          </>
-        ) : null}
-        <WorkspaceBreadcrumbItem current className="min-w-10 flex-1">
-          {renamingTitle !== null ? (
-            <input
-              autoFocus
-              aria-label="Thread title"
-              className="min-w-0 flex-1 rounded-sm bg-transparent text-sm font-medium text-foreground outline-none ring-1 ring-ring/50 focus:ring-ring"
-              defaultValue={renamingTitle}
-              onBlur={(event) => {
-                if (renameCommittedRef.current) return;
-                commitRename(event.currentTarget.value);
-              }}
-              onFocus={(event) => event.currentTarget.select()}
-              onKeyDown={handleRenameKeyDown}
-            />
-          ) : isServerThread ? (
+      {/* The project always leads the header: knowing which project a
+          thread lives in is priority zero, and the thread title alone
+          doesn't answer it. */}
+      {activeProject ? (
+        <>
+          <WorkspaceBreadcrumbItem className="shrink">
             <Tooltip>
               <TooltipTrigger
                 render={
                   <button
-                    ref={titleButtonRef}
                     type="button"
-                    aria-label={`Thread actions for ${activeThreadTitle}`}
-                    aria-haspopup="menu"
-                    onClick={openMenuFromTitle}
-                    onDoubleClick={handleTitleDoubleClick}
-                    onBlur={cancelPendingTitleMenu}
-                    className="group/thread-title inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label={`New thread in ${activeProjectName}`}
+                    onClick={onNewThreadInProject}
+                    className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                   />
                 }
               >
-                <h2 className="min-w-0">
-                  <WorkspaceBreadcrumbText>{activeThreadTitle}</WorkspaceBreadcrumbText>
-                </h2>
-                <ChevronDownIcon
-                  aria-hidden
-                  data-thread-title-chevron
-                  className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/thread-title:opacity-100 group-focus-visible/thread-title:opacity-100"
+                <ProjectFavicon project={activeProject} className="size-3.5" />
+                <WorkspaceBreadcrumbText className="max-w-40">
+                  {activeProjectName}
+                </WorkspaceBreadcrumbText>
+              </TooltipTrigger>
+              <TooltipPopup side="top">New thread in {activeProjectName}</TooltipPopup>
+            </Tooltip>
+          </WorkspaceBreadcrumbItem>
+          <WorkspaceBreadcrumbSeparator>
+            <WorkspaceBreadcrumbText>/</WorkspaceBreadcrumbText>
+          </WorkspaceBreadcrumbSeparator>
+        </>
+      ) : null}
+      <WorkspaceBreadcrumbItem current className="min-w-10 flex-1">
+        {renamingTitle !== null ? (
+          <input
+            autoFocus
+            aria-label="Thread title"
+            className="min-w-0 flex-1 rounded-sm bg-transparent text-sm font-medium text-foreground outline-none ring-1 ring-ring/50 focus:ring-ring"
+            defaultValue={renamingTitle}
+            onBlur={(event) => {
+              if (renameCommittedRef.current) return;
+              commitRename(event.currentTarget.value);
+            }}
+            onFocus={(event) => event.currentTarget.select()}
+            onKeyDown={handleRenameKeyDown}
+          />
+        ) : isServerThread ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  ref={titleButtonRef}
+                  type="button"
+                  aria-label={`Thread actions for ${activeThreadTitle}`}
+                  aria-haspopup="menu"
+                  onClick={openMenuFromTitle}
+                  onDoubleClick={handleTitleDoubleClick}
+                  onBlur={cancelPendingTitleMenu}
+                  className="group/thread-title inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 />
-              </TooltipTrigger>
-              <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
-            </Tooltip>
-          ) : (
-            <Tooltip>
-              <TooltipTrigger
-                render={<h2 aria-label={activeThreadTitle} className="min-w-0 flex-1" />}
-              >
+              }
+            >
+              <h2 className="min-w-0">
                 <WorkspaceBreadcrumbText>{activeThreadTitle}</WorkspaceBreadcrumbText>
-              </TooltipTrigger>
-              <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
-            </Tooltip>
-          )}
-        </WorkspaceBreadcrumbItem>
-      </WorkspaceBreadcrumb>
+              </h2>
+              <ChevronDownIcon
+                aria-hidden
+                data-thread-title-chevron
+                className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/thread-title:opacity-100 group-focus-visible/thread-title:opacity-100"
+              />
+            </TooltipTrigger>
+            <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
+          </Tooltip>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger
+              render={<h2 aria-label={activeThreadTitle} className="min-w-0 flex-1" />}
+            >
+              <WorkspaceBreadcrumbText>{activeThreadTitle}</WorkspaceBreadcrumbText>
+            </TooltipTrigger>
+            <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
+          </Tooltip>
+        )}
+      </WorkspaceBreadcrumbItem>
+    </WorkspaceBreadcrumb>
+  );
+  return (
+    <div
+      className={cn(
+        "@container/header-actions flex min-w-0 flex-1",
+        isMobileLayout ? "flex-col" : "items-center gap-2 sm:gap-3",
+      )}
+      onContextMenu={handleHeaderContextMenu}
+    >
       <div
-        ref={headerActionsRef}
-        data-chat-header-actions
         className={cn(
-          "flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3",
-          // Reserve two panel toggles plus their 4px gaps and 1px edge inset.
-          // The page header adds 8px more right padding at sm.
-          rightPanelOpen ? "pr-0" : "pr-[calc(--spacing(18)+1px)] sm:pr-[calc(--spacing(14)+1px)]",
-          "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
+          "flex min-w-0 items-center",
+          isMobileLayout ? "w-full flex-1 gap-3" : "flex-1 gap-2 sm:gap-3",
         )}
       >
-        <Menu open={actionsCollapsed && actionsOpen} onOpenChange={setActionsOpen}>
-          <MenuTrigger
-            className={
-              actionsCollapsed &&
-              (activeProjectScripts || showOpenInPicker || (activeProjectName && gitCwd))
-                ? undefined
-                : "hidden"
-            }
-            render={<Button size="icon-sm" variant="ghost" aria-label="More header actions" />}
-          >
-            <EllipsisIcon className="size-4" />
-          </MenuTrigger>
-          <div ref={mountInlineActions} className="contents" />
-          <MenuPopup
-            data-chat-header-actions
-            keepMounted
-            aria-label="Header actions"
-            align="end"
-            className="min-w-56 max-w-[calc(100vw-2rem)]"
-            finalFocus={actionsCollapsed ? undefined : false}
-          >
-            <div ref={mountMenuActions} className="contents" />
-            {createPortal(headerActions, actionsContainer)}
-          </MenuPopup>
-        </Menu>
+        {breadcrumb}
+        {isMobileLayout ? (
+          <div className="flex shrink-0 items-center gap-3">
+            <ChatHeaderMobileMenuToggle
+              expanded={mobileMenuExpanded}
+              onExpandedChange={setMobileMenuExpanded}
+            />
+            {mobilePanelLayoutControls}
+          </div>
+        ) : null}
       </div>
+      {!isMobileLayout ? (
+        <div
+          ref={headerActionsRef}
+          data-chat-header-actions
+          className={cn(
+            "flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3",
+            // Reserve two panel toggles plus their 4px gaps and 1px edge inset.
+            // The page header adds 8px more right padding at sm.
+            rightPanelOpen
+              ? "pr-0"
+              : "pr-[calc(--spacing(18)+1px)] sm:pr-[calc(--spacing(14)+1px)]",
+            "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
+          )}
+        >
+          <Menu open={actionsCollapsed && actionsOpen} onOpenChange={setActionsOpen}>
+            <MenuTrigger
+              className={
+                actionsCollapsed &&
+                (activeProjectScripts || showOpenInPicker || (activeProjectName && gitCwd))
+                  ? undefined
+                  : "hidden"
+              }
+              render={<Button size="icon-sm" variant="ghost" aria-label="More header actions" />}
+            >
+              <EllipsisIcon className="size-4" />
+            </MenuTrigger>
+            <div ref={mountInlineActions} className="contents" />
+            <MenuPopup
+              data-chat-header-actions
+              keepMounted
+              aria-label="Header actions"
+              align="end"
+              className="min-w-56 max-w-[calc(100vw-2rem)]"
+              finalFocus={actionsCollapsed ? undefined : false}
+            >
+              <div ref={mountMenuActions} className="contents" />
+              {createPortal(headerActions, actionsContainer)}
+            </MenuPopup>
+          </Menu>
+        </div>
+      ) : null}
+      {isMobileLayout && mobileMenuExpanded ? (
+        // The row's controls render their menus in portals, so the descendant button sizing only
+        // grows their inline triggers to a touch target.
+        <div
+          id="chat-header-mobile-menu"
+          data-chat-header-mobile-menu
+          className="flex w-full shrink-0 flex-wrap items-center justify-end gap-3 border-t border-border/60 py-2.5 [&_button]:h-9 [&_button]:px-3"
+        >
+          {headerActions}
+        </div>
+      ) : null}
     </div>
   );
 });

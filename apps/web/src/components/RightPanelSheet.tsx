@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { type HTMLAttributes, type ReactNode } from "react";
 
 import {
   RIGHT_PANEL_SHEET_CLASS_NAME,
@@ -9,6 +9,7 @@ import { Sheet, SheetPopup } from "./ui/sheet";
 export function RightPanelSheet(props: {
   animationDurationMs: number;
   children: ReactNode;
+  gestureProps?: HTMLAttributes<HTMLDivElement>;
   open: boolean;
   underFloatingPreview?: boolean;
   onClose: () => void;
@@ -35,7 +36,9 @@ export function RightPanelSheet(props: {
           : {})}
         className={RIGHT_PANEL_SHEET_CLASS_NAME}
       >
-        {props.children}
+        <div {...props.gestureProps} className="flex h-full min-h-0 flex-col">
+          {props.children}
+        </div>
       </SheetPopup>
     </Sheet>
   );

@@ -13,6 +13,26 @@ export function resolveTerminalDrawerLayout(viewportWidth: number): TerminalDraw
   return isTerminalDrawerMobileLayout(viewportWidth) ? "mobile" : "desktop";
 }
 
+/**
+ * Mobile drawers stretch to whatever the chat column has left under the header instead of
+ * standing on a resizable pixel strip, so callers style them with flex fill and skip the
+ * inline height.
+ */
+export function shouldFillTerminalDrawer(layout: TerminalDrawerLayout): boolean {
+  return layout === "mobile";
+}
+
+/**
+ * A filling mobile drawer owns the whole area under the header, so the chat column is hidden
+ * rather than unmounted; unmounting would drop timeline scroll state and composer drafts.
+ */
+export function shouldSuppressChatColumn(options: {
+  layout: TerminalDrawerLayout;
+  terminalOpen: boolean;
+}): boolean {
+  return options.terminalOpen && shouldFillTerminalDrawer(options.layout);
+}
+
 export function resolveTerminalDrawerMaxHeight(options: {
   viewportHeight: number;
   layout: TerminalDrawerLayout;
