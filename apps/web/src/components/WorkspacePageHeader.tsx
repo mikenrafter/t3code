@@ -16,7 +16,7 @@ export function WorkspacePageHeader({
   return (
     <header
       className={cn(
-        "flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center gap-3 pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)]",
+        "flex h-[var(--workspace-topbar-height)] min-h-[var(--workspace-topbar-height)] shrink-0 items-center gap-3 pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none max-[980px]:min-h-[var(--workspace-topbar-height)] max-[980px]:h-auto max-[980px]:flex-col max-[980px]:items-stretch max-[980px]:gap-4 max-[980px]:pl-[calc(env(safe-area-inset-left)+0.975rem)] max-[980px]:pr-[calc(env(safe-area-inset-right)+0.975rem)] sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)]",
         electron && "drag-region",
         reserveNativeControls && "wco:pr-[var(--workspace-native-controls-inset)]",
         COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,

@@ -6,6 +6,8 @@ import {
   resolveTerminalDrawerHeight,
   resolveTerminalDrawerLayout,
   resolveTerminalDrawerMaxHeight,
+  shouldFillTerminalDrawer,
+  shouldSuppressChatColumn,
   TERMINAL_DRAWER_MIN_HEIGHT,
 } from "./threadTerminalDrawerLayout";
 
@@ -43,6 +45,17 @@ describe("threadTerminalDrawerLayout", () => {
         layout: "mobile",
       }),
     ).toBe(800);
+  });
+
+  it("only fills the chat column on mobile", () => {
+    expect(shouldFillTerminalDrawer("mobile")).toBe(true);
+    expect(shouldFillTerminalDrawer("desktop")).toBe(false);
+  });
+
+  it("hides the chat column only for an open mobile drawer", () => {
+    expect(shouldSuppressChatColumn({ layout: "mobile", terminalOpen: true })).toBe(true);
+    expect(shouldSuppressChatColumn({ layout: "mobile", terminalOpen: false })).toBe(false);
+    expect(shouldSuppressChatColumn({ layout: "desktop", terminalOpen: true })).toBe(false);
   });
 
   it("still respects the minimum drawer height on desktop", () => {

@@ -7,6 +7,8 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { useMediaQuery } from "../hooks/useMediaQuery";
+import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
@@ -65,6 +67,7 @@ function readInitialThreadSidebarWidth(): number {
 }
 
 function SidebarControl() {
+  const isMobileLayout = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar } = useSidebar();
   const isSidebarVisible = useSidebarVisibility();
@@ -94,6 +97,10 @@ function SidebarControl() {
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [keybindings, toggleSidebar]);
+
+  if (isMobileLayout) {
+    return null;
+  }
 
   return (
     // The right-side layout controls carry mr-px (border compensation inside

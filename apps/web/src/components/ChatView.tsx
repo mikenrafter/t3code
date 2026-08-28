@@ -175,6 +175,11 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
+  shouldFillTerminalDrawer,
+  shouldSuppressChatColumn,
+  type TerminalDrawerLayout,
+} from "./threadTerminalDrawerLayout";
+import {
   AlarmClockIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -354,6 +359,7 @@ import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
+import { useMobilePanelGestures } from "./mobile/useMobilePanelGestures";
 import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
@@ -683,6 +689,8 @@ interface PersistentThreadTerminalDrawerProps {
   threadRef: { environmentId: EnvironmentId; threadId: ThreadId };
   threadId: ThreadId;
   visible: boolean;
+  /** Mobile drawers stretch to the column under the header instead of sitting on a pixel strip. */
+  fillColumn: boolean;
   launchContext: PersistentTerminalLaunchContext | null;
   focusRequestId: number;
   splitShortcutLabel: string | undefined;
@@ -697,6 +705,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   threadRef,
   threadId,
   visible,
+  fillColumn,
   launchContext,
   focusRequestId,
   splitShortcutLabel,
@@ -1009,7 +1018,11 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   }
 
   return (
-    <div className={visible ? undefined : "hidden"}>
+    <div
+      className={
+        visible ? (fillColumn ? "flex min-h-0 min-w-0 flex-1 flex-col" : undefined) : "hidden"
+      }
+    >
       <ThreadTerminalDrawer
         threadRef={threadRef}
         threadId={threadId}
@@ -3438,6 +3451,16 @@ function ChatViewContent(props: ChatViewProps) {
       useRightPanelStore.getState().close(activeThreadRef);
     }
   }, [activeThreadRef]);
+  const openRightPanelFromGesture = useCallback(() => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().show(activeThreadRef);
+  }, [activeThreadRef]);
+  const panelGestureProps = useMobilePanelGestures({
+    enabled: shouldUseRightPanelSheet,
+    onShowChat: closePreviewPanel,
+    onShowRightPanel: openRightPanelFromGesture,
+    rightPanelOpen,
+  });
   const addTerminalSurface = useCallback(() => {
     if (!activeThreadRef || !activeThreadId || !activeProject) return;
     const cwd = gitCwd ?? activeProject.workspaceRoot;
@@ -6429,6 +6452,21 @@ function ChatViewContent(props: ChatViewProps) {
       onToggleRightPanel={toggleRightPanel}
     />
   );
+  const mobileHeaderTerminalControls = (
+    <PanelLayoutControls
+      showRightPanelControl={false}
+      touchFriendly
+      terminalAvailable={activeProject !== null}
+      terminalOpen={terminalUiState.terminalOpen}
+      terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
+      rightPanelAvailable={activeProject !== null}
+      rightPanelOpen={rightPanelOpen}
+      rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
+      liveAgentCount={0}
+      onToggleTerminal={toggleTerminalVisibility}
+      onToggleRightPanel={toggleRightPanel}
+    />
+  );
   const panelLayoutControls = (
     <div
       className={cn(
@@ -6571,6 +6609,16 @@ function ChatViewContent(props: ChatViewProps) {
   });
   const externalComposerDrawerAttached =
     composerBannerItems.length > 0 || Boolean(threadSyncPhase && !activeEnvironmentUnavailable);
+  const terminalDrawerLayout: TerminalDrawerLayout = shouldUseRightPanelSheet
+    ? "mobile"
+    : "desktop";
+  const terminalDrawerFillsColumn = shouldFillTerminalDrawer(terminalDrawerLayout);
+  // The mobile drawer fills everything under the header, so the chat column is hidden rather than
+  // squeezed to zero height, where its bottom-anchored composer overlay paints over the header.
+  const chatColumnHiddenByTerminal = shouldSuppressChatColumn({
+    layout: terminalDrawerLayout,
+    terminalOpen: Boolean(terminalUiState.terminalOpen),
+  });
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
@@ -6589,7 +6637,7 @@ function ChatViewContent(props: ChatViewProps) {
           reserveNativeControls={reserveTitleBarControlInset && !inlineRightPanelOwnsTitleBar}
           className="relative bg-background"
         >
-          {!rightPanelOpen ? panelLayoutControls : null}
+          {!rightPanelOpen && !shouldUseRightPanelSheet ? panelLayoutControls : null}
           <ChatHeader
             {...(!supportsPullRequests || threadRepository === null
               ? {}
@@ -6611,6 +6659,9 @@ function ChatViewContent(props: ChatViewProps) {
             keybindings={keybindings}
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}
+            mobilePanelLayoutControls={
+              shouldUseRightPanelSheet ? mobileHeaderTerminalControls : undefined
+            }
             gitCwd={gitCwd}
             onNewThreadInProject={handleNewThreadInActiveProject}
             onRunProjectScript={runProjectScript}
@@ -6629,9 +6680,10 @@ function ChatViewContent(props: ChatViewProps) {
           }}
         />
         {/* Main content area with optional plan sidebar */}
-        <div className="flex min-h-0 min-w-0 flex-1">
+        <div className={cn("flex min-h-0 min-w-0 flex-1", chatColumnHiddenByTerminal && "hidden")}>
           {/* Chat column */}
           <div
+            {...panelGestureProps}
             className="relative flex min-h-0 min-w-0 flex-1 flex-col"
             data-chat-workspace-drop-target="true"
             onDragEnter={workspaceFileDropHandlers.onDragEnter}
@@ -6972,6 +7024,7 @@ function ChatViewContent(props: ChatViewProps) {
             threadRef={mountedThreadRef}
             threadId={mountedThreadRef.threadId}
             visible={mountedThreadKey === activeThreadKey && terminalUiState.terminalOpen}
+            fillColumn={terminalDrawerFillsColumn}
             launchContext={
               mountedThreadKey === activeThreadKey ? (activeTerminalLaunchContext ?? null) : null
             }
@@ -7022,7 +7075,7 @@ function ChatViewContent(props: ChatViewProps) {
         </RightPanelTabs>
       ) : null}
       {shouldUseRightPanelSheet && rightPanelOpen && activeThreadRef ? (
-        <RightPanelSheet open onClose={closePreviewPanel}>
+        <RightPanelSheet gestureProps={panelGestureProps} open onClose={closePreviewPanel}>
           <RightPanelTabs
             mode="sheet"
             // Same effective inset as the closed-state titlebar controls

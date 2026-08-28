@@ -2,6 +2,11 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { resolveRenameCommit, shouldShowOpenInPicker } from "./ChatHeader";
+import {
+  resolveChatHeaderMobileMenuIcon,
+  shouldRenderChatHeaderInlineActions,
+  toggleChatHeaderMobileMenu,
+} from "./chatHeaderMobileMenu";
 
 describe("shouldShowOpenInPicker", () => {
   const primaryEnvironmentId = EnvironmentId.make("environment-primary");
@@ -80,5 +85,22 @@ describe("resolveRenameCommit", () => {
     expect(resolveRenameCommit({ title: " Old ", originalTitle: "Old" })).toEqual({
       action: "noop",
     });
+  });
+});
+
+describe("chat header mobile menu", () => {
+  it("toggles expanded state", () => {
+    expect(toggleChatHeaderMobileMenu(false)).toBe(true);
+    expect(toggleChatHeaderMobileMenu(true)).toBe(false);
+  });
+
+  it("switches icon affordance when expanded", () => {
+    expect(resolveChatHeaderMobileMenuIcon(false)).toBe("menu");
+    expect(resolveChatHeaderMobileMenuIcon(true)).toBe("chevron-down");
+  });
+
+  it("hides inline actions on mobile layout", () => {
+    expect(shouldRenderChatHeaderInlineActions(true)).toBe(false);
+    expect(shouldRenderChatHeaderInlineActions(false)).toBe(true);
   });
 });

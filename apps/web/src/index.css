@@ -133,6 +133,19 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   );
 }
 
+/* Mobile chat chrome. Declared after `.wco` so the taller topbar wins on source order. */
+@media (max-width: 980px) {
+  :root {
+    --workspace-topbar-height: 68px;
+    --workspace-controls-left: calc(env(safe-area-inset-left) + 0.975rem);
+    --workspace-controls-right: calc(env(safe-area-inset-right) + 0.975rem);
+  }
+
+  .wco {
+    --workspace-topbar-height: max(env(titlebar-area-height, 68px), 68px);
+  }
+}
+
 /* The font tokens are declared outside the inline theme so utilities reference
    the variables and Settings -> Appearance can override them at runtime. The
    default stacks are mirrored in `appearanceFonts.ts`. */

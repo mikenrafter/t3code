@@ -78,6 +78,7 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import {
   resolveTerminalDrawerHeight,
+  shouldFillTerminalDrawer,
   type TerminalDrawerLayout,
 } from "./threadTerminalDrawerLayout";
 
@@ -1069,6 +1070,12 @@ export default function ThreadTerminalDrawer({
   const isPanel = mode === "panel";
   const isMobileDrawer = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const drawerLayout: TerminalDrawerLayout = isMobileDrawer ? "mobile" : "desktop";
+  // Mobile drawers fill the column under the chat header, so they drop the pixel height and the
+  // resize handle and trade the compact floating cluster for a touch-sized control row.
+  const isMobileFullDrawer = !isPanel && shouldFillTerminalDrawer(drawerLayout);
+  const terminalActionButtonPadding = isMobileFullDrawer ? "p-2.5" : "p-1";
+  const terminalActionIconClass = isMobileFullDrawer ? "size-8" : "size-3.25";
+  const terminalActionDividerClass = isMobileFullDrawer ? "h-10" : "h-4";
   const clampDrawerHeight = useCallback(
     (requestedHeight: number) => {
       const viewportHeight =
@@ -1303,12 +1310,15 @@ export default function ThreadTerminalDrawer({
 
   const syncHeight = useCallback(
     (nextHeight: number) => {
+      // A filling drawer has no pixel height of its own; persisting one would overwrite the
+      // desktop strip height the user set.
+      if (isMobileFullDrawer) return;
       const clampedHeight = clampDrawerHeight(nextHeight);
       if (lastSyncedHeightRef.current === clampedHeight) return;
       lastSyncedHeightRef.current = clampedHeight;
       onHeightChangeRef.current(clampedHeight);
     },
-    [clampDrawerHeight],
+    [clampDrawerHeight, isMobileFullDrawer],
   );
 
   useEffect(() => {
@@ -1404,9 +1414,13 @@ export default function ThreadTerminalDrawer({
         data-terminal-owner={isPanel ? "right-panel" : "drawer"}
         className={cn(
           "thread-terminal-drawer relative flex min-w-0 flex-col overflow-hidden bg-background",
-          isPanel ? "h-full flex-1" : "shrink-0 border-t border-border/80",
+          isPanel ? "h-full flex-1" : "border-t border-border/80",
+          !isPanel &&
+            (isMobileFullDrawer
+              ? "z-30 min-h-0 flex-1 pb-[env(safe-area-inset-bottom)]"
+              : "shrink-0"),
         )}
-        style={isPanel ? undefined : { height: `${drawerHeight}px` }}
+        style={isPanel || isMobileFullDrawer ? undefined : { height: `${drawerHeight}px` }}
       >
         {!isPanel && !isMobileDrawer ? (
           <div
@@ -1428,15 +1442,66 @@ export default function ThreadTerminalDrawer({
   }
 
   const activeTerminalLaunchLocation = resolveTerminalLaunchLocation(resolvedActiveTerminalId);
+  // Shared by the desktop floating cluster and the mobile control row; the size classes above are
+  // the only difference between them.
+  const terminalActionCluster = (
+    <>
+      <TerminalActionButton
+        className={cn(
+          `${terminalActionButtonPadding} text-foreground/90 transition-colors`,
+          hasReachedSplitLimit
+            ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+            : "hover:bg-accent",
+        )}
+        onClick={onSplitTerminalAction}
+        label={splitTerminalActionLabel}
+      >
+        <SquareSplitHorizontal className={terminalActionIconClass} />
+      </TerminalActionButton>
+      <div className={cn("w-px bg-border/80", terminalActionDividerClass)} />
+      <TerminalActionButton
+        className={cn(
+          `${terminalActionButtonPadding} text-foreground/90 transition-colors`,
+          hasReachedSplitLimit
+            ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+            : "hover:bg-accent",
+        )}
+        onClick={onSplitTerminalVerticalAction}
+        label={splitTerminalVerticalActionLabel}
+      >
+        <SquareSplitVertical className={terminalActionIconClass} />
+      </TerminalActionButton>
+      <div className={cn("w-px bg-border/80", terminalActionDividerClass)} />
+      <TerminalActionButton
+        className={`${terminalActionButtonPadding} text-foreground/90 transition-colors hover:bg-accent`}
+        onClick={onNewTerminalAction}
+        label={newTerminalActionLabel}
+      >
+        <Plus className={terminalActionIconClass} />
+      </TerminalActionButton>
+      <div className={cn("w-px bg-border/80", terminalActionDividerClass)} />
+      <TerminalActionButton
+        className={`${terminalActionButtonPadding} text-foreground/90 transition-colors hover:bg-accent`}
+        onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+        label={closeTerminalActionLabel}
+      >
+        <Trash2 className={terminalActionIconClass} />
+      </TerminalActionButton>
+    </>
+  );
 
   return (
     <aside
       data-terminal-owner={isPanel ? "right-panel" : "drawer"}
       className={cn(
         "thread-terminal-drawer relative flex min-w-0 flex-col overflow-hidden bg-background",
-        isPanel ? "h-full flex-1" : "shrink-0 border-t border-border/80",
+        isPanel ? "h-full flex-1" : "border-t border-border/80",
+        !isPanel &&
+          (isMobileFullDrawer
+            ? "z-30 min-h-0 flex-1 pb-[env(safe-area-inset-bottom)]"
+            : "shrink-0"),
       )}
-      style={isPanel ? undefined : { height: `${drawerHeight}px` }}
+      style={isPanel || isMobileFullDrawer ? undefined : { height: `${drawerHeight}px` }}
     >
       {!isPanel && !isMobileDrawer ? (
         <div
@@ -1448,50 +1513,22 @@ export default function ThreadTerminalDrawer({
         />
       ) : null}
 
-      {!hasTerminalSidebar && (
-        <div className="pointer-events-none absolute right-2 top-2 z-20">
-          <div className="pointer-events-auto inline-flex items-center overflow-hidden rounded-md border border-border/80 bg-background shadow-xs">
-            <TerminalActionButton
-              className={`p-1 text-foreground/90 transition-colors ${
-                hasReachedSplitLimit
-                  ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                  : "hover:bg-accent"
-              }`}
-              onClick={onSplitTerminalAction}
-              label={splitTerminalActionLabel}
-            >
-              <SquareSplitHorizontal className="size-3.25" />
-            </TerminalActionButton>
-            <div className="h-4 w-px bg-border/80" />
-            <TerminalActionButton
-              className={`p-1 text-foreground/90 transition-colors ${
-                hasReachedSplitLimit
-                  ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                  : "hover:bg-accent"
-              }`}
-              onClick={onSplitTerminalVerticalAction}
-              label={splitTerminalVerticalActionLabel}
-            >
-              <SquareSplitVertical className="size-3.25" />
-            </TerminalActionButton>
-            <div className="h-4 w-px bg-border/80" />
-            <TerminalActionButton
-              className="p-1 text-foreground/90 transition-colors hover:bg-accent"
-              onClick={onNewTerminalAction}
-              label={newTerminalActionLabel}
-            >
-              <Plus className="size-3.25" />
-            </TerminalActionButton>
-            <div className="h-4 w-px bg-border/80" />
-            <TerminalActionButton
-              className="p-1 text-foreground/90 transition-colors hover:bg-accent"
-              onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
-              label={closeTerminalActionLabel}
-            >
-              <Trash2 className="size-3.25" />
-            </TerminalActionButton>
+      {isMobileFullDrawer ? (
+        // In flow rather than floating: a full-height mobile terminal would otherwise start its
+        // output underneath the controls.
+        <div className="flex shrink-0 items-center justify-end border-b border-border/80 bg-background py-1.5 pe-[calc(env(safe-area-inset-right)+0.5rem)] ps-[calc(env(safe-area-inset-left)+0.5rem)]">
+          <div className="inline-flex items-center overflow-hidden rounded-md border border-border/80 bg-background shadow-xs">
+            {terminalActionCluster}
           </div>
         </div>
+      ) : (
+        !hasTerminalSidebar && (
+          <div className="pointer-events-none absolute right-2 top-2 z-20">
+            <div className="pointer-events-auto inline-flex items-center overflow-hidden rounded-md border border-border/80 bg-background shadow-xs">
+              {terminalActionCluster}
+            </div>
+          </div>
+        )
       )}
 
       <div className="min-h-0 w-full flex-1">
@@ -1592,46 +1629,49 @@ export default function ThreadTerminalDrawer({
 
           {hasTerminalSidebar && (
             <aside className="flex w-36 min-w-36 flex-col border border-border/70 bg-muted/10">
-              <div className="flex h-[22px] items-stretch justify-end border-b border-border/70">
-                <div className="inline-flex h-full items-stretch">
-                  <TerminalActionButton
-                    className={`inline-flex h-full items-center px-1 text-foreground/90 transition-colors ${
-                      hasReachedSplitLimit
-                        ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                        : "hover:bg-accent/70"
-                    }`}
-                    onClick={onSplitTerminalAction}
-                    label={splitTerminalActionLabel}
-                  >
-                    <SquareSplitHorizontal className="size-3.25" />
-                  </TerminalActionButton>
-                  <TerminalActionButton
-                    className={`inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors ${
-                      hasReachedSplitLimit
-                        ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                        : "hover:bg-accent/70"
-                    }`}
-                    onClick={onSplitTerminalVerticalAction}
-                    label={splitTerminalVerticalActionLabel}
-                  >
-                    <SquareSplitVertical className="size-3.25" />
-                  </TerminalActionButton>
-                  <TerminalActionButton
-                    className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
-                    onClick={onNewTerminalAction}
-                    label={newTerminalActionLabel}
-                  >
-                    <Plus className="size-3.25" />
-                  </TerminalActionButton>
-                  <TerminalActionButton
-                    className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
-                    onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
-                    label={closeTerminalActionLabel}
-                  >
-                    <Trash2 className="size-3.25" />
-                  </TerminalActionButton>
+              {/* Mobile puts touch-sized copies of these actions in the drawer's control row. */}
+              {!isMobileFullDrawer && (
+                <div className="flex h-[22px] items-stretch justify-end border-b border-border/70">
+                  <div className="inline-flex h-full items-stretch">
+                    <TerminalActionButton
+                      className={`inline-flex h-full items-center px-1 text-foreground/90 transition-colors ${
+                        hasReachedSplitLimit
+                          ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+                          : "hover:bg-accent/70"
+                      }`}
+                      onClick={onSplitTerminalAction}
+                      label={splitTerminalActionLabel}
+                    >
+                      <SquareSplitHorizontal className="size-3.25" />
+                    </TerminalActionButton>
+                    <TerminalActionButton
+                      className={`inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors ${
+                        hasReachedSplitLimit
+                          ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+                          : "hover:bg-accent/70"
+                      }`}
+                      onClick={onSplitTerminalVerticalAction}
+                      label={splitTerminalVerticalActionLabel}
+                    >
+                      <SquareSplitVertical className="size-3.25" />
+                    </TerminalActionButton>
+                    <TerminalActionButton
+                      className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
+                      onClick={onNewTerminalAction}
+                      label={newTerminalActionLabel}
+                    >
+                      <Plus className="size-3.25" />
+                    </TerminalActionButton>
+                    <TerminalActionButton
+                      className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
+                      onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+                      label={closeTerminalActionLabel}
+                    >
+                      <Trash2 className="size-3.25" />
+                    </TerminalActionButton>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">
                 {resolvedTerminalGroups.map((terminalGroup, groupIndex) => {
