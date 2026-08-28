@@ -7,7 +7,6 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 interface PanelLayoutControlsProps {
   showTerminalControl?: boolean;
-  showRightPanelControl?: boolean;
   touchFriendly?: boolean;
   terminalAvailable: boolean;
   terminalOpen: boolean;
@@ -24,7 +23,6 @@ interface PanelLayoutControlsProps {
 
 export const PanelLayoutControls = memo(function PanelLayoutControls({
   showTerminalControl = true,
-  showRightPanelControl = true,
   touchFriendly = false,
   terminalAvailable,
   terminalOpen,
@@ -68,44 +66,42 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
           </TooltipPopup>
         </Tooltip>
       ) : null}
-      {showRightPanelControl ? (
-        <Tooltip>
-          <TooltipTrigger render={<span className="flex shrink-0" />}>
-            <Toggle
-              className={toggleClassName}
-              pressed={rightPanelOpen}
-              onPressedChange={onToggleRightPanel}
-              aria-label={
+      <Tooltip>
+        <TooltipTrigger render={<span className="flex shrink-0" />}>
+          <Toggle
+            className={toggleClassName}
+            pressed={rightPanelOpen}
+            onPressedChange={onToggleRightPanel}
+            aria-label={
+              liveAgentCount > 0
+                ? `Toggle right panel, ${liveAgentCount} ${liveAgentCount === 1 ? "agent" : "agents"} working`
+                : "Toggle right panel"
+            }
+            variant="ghost"
+            size="sm"
+            disabled={!rightPanelAvailable}
+          >
+            <PanelRightIcon className="size-4" />
+            {liveAgentCount > 0 ? (
+              <span
+                aria-hidden
+                className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-info px-1 text-[9px] font-semibold tabular-nums text-white"
+              >
+                {liveAgentCount}
+              </span>
+            ) : null}
+          </Toggle>
+        </TooltipTrigger>
+        <TooltipPopup side="bottom">
+          {rightPanelAvailable
+            ? `Toggle right panel${rightPanelShortcutLabel ? ` (${rightPanelShortcutLabel})` : ""}${
                 liveAgentCount > 0
-                  ? `Toggle right panel, ${liveAgentCount} ${liveAgentCount === 1 ? "agent" : "agents"} working`
-                  : "Toggle right panel"
-              }
-              variant="ghost"
-              size="sm"
-              disabled={!rightPanelAvailable}
-            >
-              <PanelRightIcon className="size-4" />
-              {liveAgentCount > 0 ? (
-                <span
-                  aria-hidden
-                  className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-info px-1 text-[9px] font-semibold tabular-nums text-white"
-                >
-                  {liveAgentCount}
-                </span>
-              ) : null}
-            </Toggle>
-          </TooltipTrigger>
-          <TooltipPopup side="bottom">
-            {rightPanelAvailable
-              ? `Toggle right panel${rightPanelShortcutLabel ? ` (${rightPanelShortcutLabel})` : ""}${
-                  liveAgentCount > 0
-                    ? ` · ${liveAgentCount} ${liveAgentCount === 1 ? "agent" : "agents"} working`
-                    : ""
-                }`
-              : rightPanelUnavailableLabel}
-          </TooltipPopup>
-        </Tooltip>
-      ) : null}
+                  ? ` · ${liveAgentCount} ${liveAgentCount === 1 ? "agent" : "agents"} working`
+                  : ""
+              }`
+            : rightPanelUnavailableLabel}
+        </TooltipPopup>
+      </Tooltip>
     </div>
   );
 });

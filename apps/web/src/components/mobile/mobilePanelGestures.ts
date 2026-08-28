@@ -1,5 +1,7 @@
-export const MOBILE_SWIPE_THRESHOLD_PX = 56;
-export const MOBILE_SWIPE_MAX_VERTICAL_DOMINANCE = 1.25;
+export const MOBILE_SWIPE_THRESHOLD_PX = 36;
+export const MOBILE_SWIPE_MAX_VERTICAL_DOMINANCE = 1.6;
+/** Distance to lock a drag as horizontal and suppress native scroll/back-swipe, well under the commit threshold above so the browser yields before it decides to scroll instead. */
+export const MOBILE_SWIPE_LOCK_PX = 12;
 
 export type SwipeDirection = "left" | "right" | "none";
 
@@ -27,6 +29,15 @@ export function resolveSwipeDirection(
     return "none";
   }
   return deltaX > 0 ? "right" : "left";
+}
+
+/**
+ * True once a drag has moved far enough, mostly horizontally, that it should lock in as a panel
+ * swipe. Callers use this to preempt native touch handling (vertical scroll, edge-swipe-back)
+ * before the browser commits to it, well before the full swipe threshold resolves a direction.
+ */
+export function isLockingHorizontalSwipe(deltaX: number, deltaY: number): boolean {
+  return resolveSwipeDirection(deltaX, deltaY, MOBILE_SWIPE_LOCK_PX) !== "none";
 }
 
 export function isInteractiveGestureTarget(target: EventTarget | null): boolean {
