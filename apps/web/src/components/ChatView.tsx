@@ -213,6 +213,11 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
+  shouldFillTerminalDrawer,
+  shouldSuppressChatColumn,
+  type TerminalDrawerLayout,
+} from "./threadTerminalDrawerLayout";
+import {
   AlarmClockIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -435,6 +440,7 @@ import {
 } from "../lib/attachmentUploadQueue";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
+import { useMobilePanelGestures } from "./mobile/useMobilePanelGestures";
 import { previewEnvironment } from "../state/preview";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -816,6 +822,8 @@ interface PersistentThreadTerminalDrawerProps {
   threadRef: { environmentId: EnvironmentId; threadId: ThreadId };
   threadId: ThreadId;
   active: boolean;
+  /** Mobile drawers stretch to the column under the header instead of sitting on a pixel strip. */
+  fillColumn: boolean;
   launchContext: PersistentTerminalLaunchContext | null;
   focusRequestId: number;
   splitShortcutLabel: string | undefined;
@@ -830,6 +838,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   threadRef,
   threadId,
   active,
+  fillColumn,
   launchContext,
   focusRequestId,
   splitShortcutLabel,
@@ -1145,45 +1154,25 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   return (
     <div
       className={cn(
-        "grid shrink-0 overflow-clip",
-        active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
-        active &&
-          "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
-        active && visible && "[[data-panel-animations=true]_&]:starting:grid-rows-[0fr]!",
+        "overflow-clip",
+        visible && fillColumn
+          ? // Mobile drawers stretch to the column under the header instead of the pixel strip.
+            "flex min-h-0 w-full flex-1 flex-col"
+          : cn(
+              "grid shrink-0",
+              active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
+              active &&
+                "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:ease-out",
+              active && visible && "[[data-panel-animations=true]_&]:starting:grid-rows-[0fr]!",
+            ),
       )}
     >
-      <div className="min-h-0 overflow-clip">
-        <ThreadTerminalDrawer
-          threadRef={threadRef}
-          threadId={threadId}
-          cwd={cwd}
-          worktreePath={effectiveWorktreePath}
-          runtimeEnv={runtimeEnv}
-          visible={visible}
-          height={terminalUiState.terminalHeight}
-          // Known-session order is MRU and changes on focus; persisted store order keeps sidebar labels stable.
-          terminalIds={terminalUiState.terminalIds}
-          activeTerminalId={terminalUiState.activeTerminalId}
-          terminalGroups={terminalUiState.terminalGroups}
-          activeTerminalGroupId={terminalUiState.activeTerminalGroupId}
-          focusRequestId={focusRequestId + localFocusRequestId + (visible ? 1 : 0)}
-          onSplitTerminal={splitTerminal}
-          onSplitTerminalVertical={splitTerminalVertical}
-          onNewTerminal={createNewTerminal}
-          splitShortcutLabel={visible ? splitShortcutLabel : undefined}
-          splitVerticalShortcutLabel={visible ? splitVerticalShortcutLabel : undefined}
-          newShortcutLabel={visible ? newShortcutLabel : undefined}
-          closeShortcutLabel={visible ? closeShortcutLabel : undefined}
-          keybindings={keybindings}
-          onActiveTerminalChange={activateTerminal}
-          onCloseTerminal={closeTerminal}
-          onHeightChange={setTerminalHeight}
-          onAddTerminalContext={handleAddTerminalContext}
-          terminalLabelsById={terminalLabelsById}
-          terminalLaunchLocationsById={terminalLaunchLocationsById}
-        />
-      </div>
-    </div>
+      <div
+        className={cn(
+          "min-h-0 overflow-clip",
+          visible && fillColumn && "flex min-w-0 flex-1 flex-col",
+        )}
+      >    </div>
   );
 });
 
@@ -4312,6 +4301,16 @@ export default function ChatView(props: ChatViewProps) {
       useRightPanelStore.getState().close(activeThreadRef);
     }
   }, [activeThreadRef]);
+  const openRightPanelFromGesture = useCallback(() => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().show(activeThreadRef);
+  }, [activeThreadRef]);
+  const panelGestureProps = useMobilePanelGestures({
+    enabled: shouldUseRightPanelSheet,
+    onShowChat: closePreviewPanel,
+    onShowRightPanel: openRightPanelFromGesture,
+    rightPanelOpen,
+  });
   const addTerminalSurface = useCallback(() => {
     if (!activeThreadRef || !activeThreadId || !activeProject) return;
     const cwd = gitCwd ?? activeProject.workspaceRoot;
@@ -7967,6 +7966,21 @@ export default function ChatView(props: ChatViewProps) {
       onToggleRightPanel={toggleRightPanel}
     />
   );
+  const mobileHeaderTerminalControls = (
+    <PanelLayoutControls
+      showRightPanelControl={false}
+      touchFriendly
+      terminalAvailable={activeProject !== null}
+      terminalOpen={terminalUiState.terminalOpen}
+      terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
+      rightPanelAvailable={activeProject !== null}
+      rightPanelOpen={rightPanelOpen}
+      rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
+      liveAgentCount={0}
+      onToggleTerminal={toggleTerminalVisibility}
+      onToggleRightPanel={toggleRightPanel}
+    />
+  );
   const panelLayoutControls = (
     <div
       className={cn(
@@ -8155,6 +8169,16 @@ export default function ChatView(props: ChatViewProps) {
     setDragActive: setIsWorkspaceFileDragActive,
     addFiles: (files) => composerRef.current?.addDroppedFiles(files),
   });
+  const terminalDrawerLayout: TerminalDrawerLayout = shouldUseRightPanelSheet
+    ? "mobile"
+    : "desktop";
+  const terminalDrawerFillsColumn = shouldFillTerminalDrawer(terminalDrawerLayout);
+  // The mobile drawer fills everything under the header, so the chat column is hidden rather than
+  // squeezed to zero height, where its bottom-anchored composer overlay paints over the header.
+  const chatColumnHiddenByTerminal = shouldSuppressChatColumn({
+    layout: terminalDrawerLayout,
+    terminalOpen: Boolean(terminalUiState.terminalOpen),
+  });
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
@@ -8179,7 +8203,9 @@ export default function ChatView(props: ChatViewProps) {
               className="pointer-events-none fixed top-[var(--workspace-controls-top)] right-[var(--workspace-controls-right)] h-[var(--workspace-topbar-height)] w-28 [-webkit-app-region:no-drag]"
             />
           ) : null}
-          {!rightPanelControlsAtRoot && !rightPanelControlsInPanel ? panelLayoutControls : null}
+          {!rightPanelControlsAtRoot && !rightPanelControlsInPanel && !shouldUseRightPanelSheet
+            ? panelLayoutControls
+            : null}
           <ChatHeader
             {...(!supportsPullRequests || activeProjectRepository === null
               ? {}
@@ -8198,6 +8224,9 @@ export default function ChatView(props: ChatViewProps) {
             keybindings={keybindings}
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}
+            mobilePanelLayoutControls={
+              shouldUseRightPanelSheet ? mobileHeaderTerminalControls : undefined
+            }
             gitCwd={gitCwd}
             onNewThreadInProject={handleNewThreadInActiveProject}
             {...(activeDraftLogicalProjectKey
@@ -8211,9 +8240,10 @@ export default function ChatView(props: ChatViewProps) {
         </WorkspacePageHeader>
 
         {/* Main content area with optional plan sidebar */}
-        <div className="flex min-h-0 min-w-0 flex-1">
+        <div className={cn("flex min-h-0 min-w-0 flex-1", chatColumnHiddenByTerminal && "hidden")}>
           {/* Chat column */}
           <div
+            {...panelGestureProps}
             className="relative flex min-h-0 min-w-0 flex-1 flex-col"
             data-chat-workspace-drop-target="true"
             onDragEnter={workspaceFileDropHandlers.onDragEnter}
@@ -8615,6 +8645,7 @@ export default function ChatView(props: ChatViewProps) {
             threadRef={mountedThreadRef}
             threadId={mountedThreadRef.threadId}
             active={mountedThreadKey === activeThreadKey}
+            fillColumn={terminalDrawerFillsColumn}
             launchContext={
               mountedThreadKey === activeThreadKey ? (activeTerminalLaunchContext ?? null) : null
             }
@@ -8674,6 +8705,7 @@ export default function ChatView(props: ChatViewProps) {
           open={rightPanelOpen}
           underFloatingPreview={previewMiniPlayerVisible}
           onClose={closePreviewPanel}
+          gestureProps={panelGestureProps}
         >
           <RightPanelTabs
             mode="sheet"
