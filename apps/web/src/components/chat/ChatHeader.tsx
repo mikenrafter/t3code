@@ -34,7 +34,7 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { OpenInPicker } from "./OpenInPicker";
-import { ChatHeaderMobileMenuToggle } from "./ChatHeaderMobileMenu";
+import { ChatHeaderMobileMenuToggle, ChatHeaderSidebarToggle } from "./ChatHeaderMobileMenu";
 import { useRemoteOpenState, type RemoteOpenMode } from "../../remoteOpen";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
@@ -516,6 +516,7 @@ export const ChatHeader = memo(function ChatHeader({
           isMobileLayout ? "w-full flex-1 gap-3" : "flex-1 gap-2 sm:gap-3",
         )}
       >
+        {isMobileLayout ? <ChatHeaderSidebarToggle /> : null}
         {breadcrumb}
         {isMobileLayout ? (
           <div className="flex shrink-0 items-center gap-3">

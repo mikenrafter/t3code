@@ -10,19 +10,21 @@ thread itself keeps the width.
 - Swipe **right** again inside the right panel to go back to the conversation.
 
 Swipes start on the conversation area and ignore buttons, links, and text fields, so tapping a
-message or scrolling the timeline still works as before. Because the gestures cover both panels, the
-phone header no longer shows the sidebar and right panel toggles.
+message or scrolling the timeline still works as before. If a swipe gets caught by a scroll instead,
+the header buttons below do the same thing with a tap.
 
 ## The thread header
 
-The header keeps the four things worth a tap: the project, the thread title, a menu, and the
-terminal drawer.
+The header holds the project, the thread title, a sidebar toggle, a menu, a right panel toggle, and
+the terminal drawer.
 
+- Select the sidebar icon to open or close the thread sidebar — the tap equivalent of swiping right.
 - Select the project to start a new thread in it.
 - Select the thread title to open thread actions, or double-tap it to rename the thread.
 - Select the **menu** button to expand the header into a second row with project scripts, **Open
   in**, and git actions. The button becomes a chevron while the row is open; select it again to
   collapse. Moving to another thread collapses it too.
+- Select the right panel icon to open or close the right panel — the tap equivalent of swiping left.
 - Select the terminal button to open the terminal drawer.
 
 ## Full-screen panels

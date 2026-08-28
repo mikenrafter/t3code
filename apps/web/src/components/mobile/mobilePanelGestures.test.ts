@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isLockingHorizontalSwipe,
+  MOBILE_SWIPE_LOCK_PX,
   MOBILE_SWIPE_THRESHOLD_PX,
   resolveGestureFromPointerSample,
   resolveMobilePanelGesture,
@@ -15,6 +17,16 @@ describe("mobilePanelGestures", () => {
     expect(resolveSwipeDirection(MOBILE_SWIPE_THRESHOLD_PX, MOBILE_SWIPE_THRESHOLD_PX)).toBe(
       "none",
     );
+  });
+
+  it("locks a drag as horizontal well before the swipe threshold resolves", () => {
+    expect(isLockingHorizontalSwipe(MOBILE_SWIPE_LOCK_PX - 1, 0)).toBe(false);
+    expect(isLockingHorizontalSwipe(MOBILE_SWIPE_LOCK_PX, 0)).toBe(true);
+    expect(MOBILE_SWIPE_LOCK_PX).toBeLessThan(MOBILE_SWIPE_THRESHOLD_PX);
+  });
+
+  it("does not lock a mostly vertical drag", () => {
+    expect(isLockingHorizontalSwipe(MOBILE_SWIPE_LOCK_PX, MOBILE_SWIPE_LOCK_PX * 2)).toBe(false);
   });
 
   it("ignores gestures without a direction", () => {

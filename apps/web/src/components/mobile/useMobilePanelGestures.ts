@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useSidebar } from "../ui/sidebar";
 import {
   isInteractiveGestureTarget,
+  isLockingHorizontalSwipe,
   resolveGestureFromPointerSample,
   type GesturePointerSample,
   type MobilePanelGestureAction,
@@ -46,6 +47,8 @@ function dispatchGestureAction(
 /**
  * Spread the returned props onto the chat column and the right panel sheet; touch gives the
  * pointerdown target implicit capture, so the swipe is tracked without stealing later taps.
+ * `touch-action: pan-y` keeps vertical list scrolling native while reserving horizontal drags for
+ * this gesture instead of the browser's own pan/back-navigation handling.
  */
 export function useMobilePanelGestures({
   enabled,
@@ -96,6 +99,16 @@ export function useMobilePanelGestures({
     }
     activeGesture.sample.currentX = event.clientX;
     activeGesture.sample.currentY = event.clientY;
+    // Claim the gesture from the browser as soon as it looks horizontal, before native scroll or
+    // edge-swipe-back commits to it and fires a pointercancel that would otherwise drop the swipe.
+    if (
+      isLockingHorizontalSwipe(
+        activeGesture.sample.currentX - activeGesture.sample.startX,
+        activeGesture.sample.currentY - activeGesture.sample.startY,
+      )
+    ) {
+      event.preventDefault();
+    }
   }, []);
 
   const finishGesture = useCallback(
@@ -140,6 +153,7 @@ export function useMobilePanelGestures({
             onPointerDown: beginGesture,
             onPointerMove: updateGesture,
             onPointerUp: finishGesture,
+            style: { touchAction: "pan-y" as const },
           }
         : {},
     [beginGesture, cancelGesture, enabled, finishGesture, updateGesture],
