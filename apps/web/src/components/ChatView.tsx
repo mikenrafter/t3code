@@ -6452,9 +6452,10 @@ function ChatViewContent(props: ChatViewProps) {
       onToggleRightPanel={toggleRightPanel}
     />
   );
-  const mobileHeaderTerminalControls = (
+  // Swiping is the primary way to switch panels on mobile, but the toggle stays in the header as
+  // a tap fallback: a swipe can be swallowed by a scroll gesture the user started first.
+  const mobileHeaderPanelControls = (
     <PanelLayoutControls
-      showRightPanelControl={false}
       touchFriendly
       terminalAvailable={activeProject !== null}
       terminalOpen={terminalUiState.terminalOpen}
@@ -6462,7 +6463,9 @@ function ChatViewContent(props: ChatViewProps) {
       rightPanelAvailable={activeProject !== null}
       rightPanelOpen={rightPanelOpen}
       rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
-      liveAgentCount={0}
+      liveAgentCount={
+        rightPanelOpen && activeRightPanelSurface?.kind === "agents" ? 0 : agentPanelModel.liveCount
+      }
       onToggleTerminal={toggleTerminalVisibility}
       onToggleRightPanel={toggleRightPanel}
     />
@@ -6660,7 +6663,7 @@ function ChatViewContent(props: ChatViewProps) {
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}
             mobilePanelLayoutControls={
-              shouldUseRightPanelSheet ? mobileHeaderTerminalControls : undefined
+              shouldUseRightPanelSheet ? mobileHeaderPanelControls : undefined
             }
             gitCwd={gitCwd}
             onNewThreadInProject={handleNewThreadInActiveProject}

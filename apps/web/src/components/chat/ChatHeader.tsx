@@ -48,7 +48,7 @@ import {
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
-import { ChatHeaderMobileMenuToggle } from "./ChatHeaderMobileMenu";
+import { ChatHeaderMobileMenuToggle, ChatHeaderSidebarToggle } from "./ChatHeaderMobileMenu";
 import { shouldRenderChatHeaderInlineActions } from "./chatHeaderMobileMenu";
 
 interface ChatHeaderProps {
@@ -436,6 +436,7 @@ export const ChatHeader = memo(function ChatHeader({
           isMobileLayout ? "w-full flex-1 gap-3" : "flex-1 gap-2 sm:gap-3",
         )}
       >
+        {isMobileLayout ? <ChatHeaderSidebarToggle /> : null}
         {breadcrumb}
         {isMobileLayout ? (
           <div className="flex shrink-0 items-center gap-3">
