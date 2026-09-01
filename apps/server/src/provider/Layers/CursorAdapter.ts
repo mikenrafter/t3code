@@ -300,6 +300,31 @@ function applyRequestedSessionConfiguration<E>(input: {
   });
 }
 
+/**
+ * Maps an approval decision to the option id the agent actually advertised.
+ * ACP lets agents choose their own option ids — only the option kind is
+ * contractual — so the decision is mapped to a kind and matched against the
+ * request's own options (same style as selectAutoApprovedPermissionOption);
+ * the generic hyphenated fallback only applies when the agent offered no
+ * option of that kind.
+ */
+function selectCursorPermissionOptionId(
+  request: EffectAcpSchema.RequestPermissionRequest,
+  decision: Exclude<ProviderApprovalDecision, "cancel">,
+): string {
+  const kind =
+    decision === "acceptForSession"
+      ? "allow_always"
+      : decision === "accept"
+        ? "allow_once"
+        : "reject_once";
+  const match = request.options.find((option) => option.kind === kind);
+  if (typeof match?.optionId === "string" && match.optionId.trim()) {
+    return match.optionId.trim();
+  }
+  return acpPermissionOutcome(decision);
+}
+
 function selectAutoApprovedPermissionOption(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): string | undefined {
@@ -734,7 +759,7 @@ export function makeCursorAdapter(
                         ? ({ outcome: "cancelled" } as const)
                         : {
                             outcome: "selected" as const,
-                            optionId: acpPermissionOutcome(resolved),
+                            optionId: selectCursorPermissionOptionId(params, resolved),
                           },
                   };
                 }),
@@ -953,6 +978,7 @@ export function makeCursorAdapter(
               return true;
             }
             ctx.cancelledTurnIds.delete(turnId);
+            settled = true;
             yield* offerRuntimeEvent({
               type: "turn.completed",
               ...(yield* makeEventStamp()),
@@ -964,6 +990,10 @@ export function makeCursorAdapter(
             return true;
           });
 
+        // Set once any path publishes this turn's terminal event, so the
+        // ensuring below cannot republish it when a late interrupt re-adds
+        // the cancel marker between the terminal publish and the drain.
+        let settled = false;
         let turnStartedEmitted = false;
         return yield* Effect.gen(function* () {
           const turnModelSelection =
@@ -1098,6 +1128,7 @@ export function makeCursorAdapter(
           // in flight or pending must leave the merged turn running.
           if (ctx.promptsInFlight === 1) {
             ctx.cancelledTurnIds.delete(turnId);
+            settled = true;
             yield* offerRuntimeEvent({
               type: "turn.completed",
               ...(yield* makeEventStamp()),
@@ -1128,6 +1159,7 @@ export function makeCursorAdapter(
               ? Effect.void
               : Effect.gen(function* () {
                   ctx.cancelledTurnIds.delete(turnId);
+                  settled = true;
                   const rawMessage =
                     typeof error === "object" && error !== null && "message" in error
                       ? error.message
@@ -1162,6 +1194,7 @@ export function makeCursorAdapter(
               Effect.gen(function* () {
                 ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
                 if (
+                  !settled &&
                   ctx.promptsInFlight === 0 &&
                   !ctx.stopped &&
                   ctx.cancelledTurnIds.delete(turnId)

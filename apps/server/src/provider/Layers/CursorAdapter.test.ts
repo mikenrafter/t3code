@@ -1377,6 +1377,147 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("does not settle a turn twice when an interrupt lands after the terminal event", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-late-interrupt");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      let interrupted = false;
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (
+            !interrupted &&
+            String(event.threadId) === String(threadId) &&
+            event.type === "turn.completed"
+          ) {
+            interrupted = true;
+            // Race the sendTurn finalizer: a late interrupt re-adds the
+            // cancel marker for the (still stale) active turn id, and must
+            // not republish the terminal event this turn already emitted —
+            // whether the interrupt names the turn or not.
+            yield* adapter.interruptTurn(threadId, event.turnId);
+            yield* adapter.interruptTurn(threadId);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "complete, then get interrupted late",
+        attachments: [],
+      });
+
+      // Let the event consumer drain anything a double settle would publish.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const turnCompletedEvents = runtimeEvents.filter(
+        (event) => String(event.threadId) === String(threadId) && event.type === "turn.completed",
+      );
+      assert.lengthOf(
+        turnCompletedEvents,
+        1,
+        "a settled turn must not emit a second terminal event",
+      );
+      const turnCompleted = turnCompletedEvents[0];
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(turnCompleted.payload.state, "completed");
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("answers permission requests with the option id the agent advertised", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-permission-option-id");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_EMIT_TOOL_CALLS: "1",
+          T3_ACP_ALLOW_ONCE_OPTION_ID: "allow_once_custom",
+          T3_ACP_ALLOW_ALWAYS_OPTION_ID: "allow_always_custom",
+        }),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const turnSettled = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (String(event.threadId) !== String(threadId)) {
+            return;
+          }
+          if (event.type === "request.opened" && event.requestId) {
+            yield* adapter.respondToRequest(
+              threadId,
+              ApprovalRequestId.make(String(event.requestId)),
+              "accept",
+            );
+          }
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(turnSettled, undefined).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "run a tool call", attachments: [] });
+      yield* Deferred.await(turnSettled);
+
+      // The wire response must select the advertised id whose KIND matches
+      // the decision, not the generic hyphenated fallback.
+      const isSelectedPermissionResponse = (entry: Record<string, unknown>) =>
+        !("method" in entry) &&
+        typeof entry.result === "object" &&
+        entry.result !== null &&
+        "outcome" in entry.result &&
+        typeof entry.result.outcome === "object" &&
+        entry.result.outcome !== null &&
+        "outcome" in entry.result.outcome &&
+        entry.result.outcome.outcome === "selected";
+      const responses = yield* waitForJsonLogMatch(requestLogPath, isSelectedPermissionResponse);
+      const selected = responses.filter(isSelectedPermissionResponse);
+      assert.isAbove(selected.length, 0, "expected at least one selected permission response");
+      for (const entry of selected) {
+        const outcome = (entry.result as Record<string, unknown>).outcome as Record<
+          string,
+          unknown
+        >;
+        assert.equal(outcome.optionId, "allow_once_custom");
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("stopping a session settles pending approval waits", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
