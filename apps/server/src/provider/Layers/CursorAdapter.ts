@@ -391,18 +391,6 @@ export function makeCursorAdapter(
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
 
-    // Locks are deleted only once a thread's session is gone (stopSession /
-    // stopAll / failed startSession): the caller either holds the semaphore
-    // or no session remains, so a later startSession can safely build a fresh
-    // one. Never delete from startSession's replacement path — that call
-    // keeps using the lock it holds to build the next session.
-    const removeThreadLock = (threadId: string) =>
-      SynchronizedRef.update(threadLocksRef, (current) => {
-        const next = new Map(current);
-        next.delete(threadId);
-        return next;
-      });
-
     const logNative = (
       threadId: ThreadId,
       method: string,
@@ -474,7 +462,7 @@ export function makeCursorAdapter(
       return Effect.succeed(ctx);
     };
 
-    const stopSessionInternal = (ctx: CursorSessionContext, removeLock = false) =>
+    const stopSessionInternal = (ctx: CursorSessionContext) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
@@ -485,9 +473,6 @@ export function makeCursorAdapter(
         }
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
         sessions.delete(ctx.threadId);
-        if (removeLock) {
-          yield* removeThreadLock(ctx.threadId);
-        }
         yield* offerRuntimeEvent({
           type: "session.exited",
           ...(yield* makeEventStamp()),
@@ -932,12 +917,7 @@ export function makeCursorAdapter(
           });
 
           return session;
-        }).pipe(
-          // A failed start leaves no session behind — drop the thread lock so
-          // the lock map does not grow one entry per failed attempt.
-          Effect.tapError(() => removeThreadLock(input.threadId)),
-          Effect.scoped,
-        ),
+        }).pipe(Effect.scoped),
       );
 
     const sendTurn: CursorAdapterShape["sendTurn"] = (input) =>
@@ -965,17 +945,22 @@ export function makeCursorAdapter(
             if (!ctx.cancelledTurnIds.has(turnId)) {
               return false;
             }
-            ctx.cancelledTurnIds.delete(turnId);
-            if (ctx.promptsInFlight === 1) {
-              yield* offerRuntimeEvent({
-                type: "turn.completed",
-                ...(yield* makeEventStamp()),
-                provider: PROVIDER,
-                threadId: input.threadId,
-                turnId,
-                payload: { state: "cancelled", stopReason: "cancelled" },
-              });
+            if (ctx.promptsInFlight !== 1) {
+              // A steered sibling prompt for this same turn is still in
+              // flight or preparing: skip the wire but keep the marker — the
+              // last draining prompt settles the turn (here once
+              // promptsInFlight === 1, or in the ensuring once it hits 0).
+              return true;
             }
+            ctx.cancelledTurnIds.delete(turnId);
+            yield* offerRuntimeEvent({
+              type: "turn.completed",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId,
+              payload: { state: "cancelled", stopReason: "cancelled" },
+            });
             return true;
           });
 
@@ -1167,17 +1152,49 @@ export function makeCursorAdapter(
                   });
                 }),
           ),
+          // The last draining prompt settles a cancelled turn whose
+          // checkpoints all ran while a steered sibling was still in flight
+          // (those skip the wire but leave the marker in place).
           Effect.ensuring(
-            Effect.sync(() => {
-              ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
-            }),
+            // Finalizers must be infallible; the decrement is a leading sync
+            // step, so ignoring a failed settle publish cannot skip it.
+            Effect.ignore(
+              Effect.gen(function* () {
+                ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
+                if (
+                  ctx.promptsInFlight === 0 &&
+                  !ctx.stopped &&
+                  ctx.cancelledTurnIds.delete(turnId)
+                ) {
+                  yield* offerRuntimeEvent({
+                    type: "turn.completed",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId,
+                    payload: { state: "cancelled", stopReason: "cancelled" },
+                  });
+                }
+              }),
+            ),
           ),
         );
       });
 
-    const interruptTurn: CursorAdapterShape["interruptTurn"] = (threadId) =>
+    const interruptTurn: CursorAdapterShape["interruptTurn"] = (threadId, turnId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
+        if (turnId !== undefined && turnId !== ctx.activeTurnId) {
+          // A cancel addressed to a non-active turn must never reach the
+          // wire: acp.cancel would kill whatever prompt IS active on this
+          // session. While a prompt is in flight the addressed sendTurn may
+          // not have become active yet, so record the cancel for its
+          // checkpoints; a completed or unknown turn is ignored.
+          if (ctx.promptsInFlight > 0) {
+            ctx.cancelledTurnIds.add(turnId);
+          }
+          return;
+        }
         // Pre-prompt cancellation cannot ride acp.cancel (a no-op until the
         // prompt is on the wire); sendTurn checks this set at its prompt
         // checkpoints and settles the turn as cancelled instead.
@@ -1257,7 +1274,7 @@ export function makeCursorAdapter(
         threadId,
         Effect.gen(function* () {
           const ctx = yield* requireSession(threadId);
-          yield* stopSessionInternal(ctx, true);
+          yield* stopSessionInternal(ctx);
         }),
       );
 
@@ -1271,14 +1288,10 @@ export function makeCursorAdapter(
       });
 
     const stopAll: CursorAdapterShape["stopAll"] = () =>
-      Effect.forEach(sessions.values(), (ctx) => stopSessionInternal(ctx, true), {
-        discard: true,
-      });
+      Effect.forEach(sessions.values(), stopSessionInternal, { discard: true });
 
     yield* Effect.addFinalizer(() =>
-      Effect.forEach(sessions.values(), (ctx) => stopSessionInternal(ctx, true), {
-        discard: true,
-      }).pipe(
+      Effect.forEach(sessions.values(), stopSessionInternal, { discard: true }).pipe(
         Effect.catch((cause) =>
           Effect.logError("Failed to emit Cursor session shutdown event.", { cause }),
         ),

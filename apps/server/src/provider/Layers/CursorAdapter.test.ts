@@ -1193,6 +1193,190 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("ignores an interrupt addressed to a completed turn while another turn is active", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-stale-interrupt");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_PROMPT_DELAY_MS: "1000",
+        }),
+      );
+      yield* serverSettings.updateSettings({
+        providers: { cursor: { binaryPath: wrapperPath } },
+      });
+
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const secondTurnStarted = yield* Deferred.make<void>();
+      let startedCount = 0;
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) === String(threadId) && event.type === "turn.started") {
+            startedCount += 1;
+            if (startedCount === 2) {
+              yield* Deferred.succeed(secondTurnStarted, undefined).pipe(Effect.ignore);
+            }
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const completedTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "first turn finishes before the interrupt arrives",
+        attachments: [],
+      });
+
+      const activeTurnFiber = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "second turn is active when the stale interrupt arrives",
+          attachments: [],
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(secondTurnStarted);
+
+      // A cancel addressed to the completed turn must not touch the active
+      // turn: no session/cancel on the wire, no cancelled settlement.
+      yield* adapter.interruptTurn(threadId, completedTurn.turnId);
+      yield* Fiber.join(activeTurnFiber);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.equal(
+        requests.filter((entry) => entry.method === "session/cancel").length,
+        0,
+        "stale interrupt must never reach session/cancel",
+      );
+
+      const threadEvents = runtimeEvents.filter(
+        (event) => String(event.threadId) === String(threadId),
+      );
+      const turnCompletedEvents = threadEvents.filter((event) => event.type === "turn.completed");
+      assert.lengthOf(turnCompletedEvents, 2);
+      for (const event of turnCompletedEvents) {
+        if (event.type === "turn.completed") {
+          assert.equal(event.payload.state, "completed");
+        }
+      }
+
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("settles a cancelled steered turn exactly once when both prompts skip the wire", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-steered-cancel");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      // Slow set_config_option responses keep both sendTurns in the prepare
+      // phase long enough for the interrupt to land before either prompt.
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_SET_CONFIG_OPTION_DELAY_MS: "500",
+        }),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const modelSelection = createModelSelection(ProviderInstanceId.make("cursor"), "composer-2", [
+        { id: "fastMode", value: true },
+      ]);
+      const waitForModelConfigWrites = (count: number) =>
+        Effect.gen(function* () {
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+            const modelWrites = requests.filter(
+              (entry) =>
+                entry.method === "session/set_config_option" &&
+                (entry.params as Record<string, unknown> | undefined)?.configId === "model",
+            );
+            if (modelWrites.length >= count) {
+              return;
+            }
+            yield* Effect.sleep("25 millis");
+          }
+          throw new Error("Timed out waiting for the config write to be in flight.");
+        });
+
+      const sendTurn1Fiber = yield* adapter
+        .sendTurn({ threadId, input: "first prompt", attachments: [], modelSelection })
+        .pipe(Effect.forkChild);
+      // sendTurn1's model write is in flight (mock delays its response by
+      // 500ms real time), so sendTurn2 steers onto the same turn id.
+      yield* waitForModelConfigWrites(1);
+      const sendTurn2Fiber = yield* adapter
+        .sendTurn({ threadId, input: "steered prompt", attachments: [], modelSelection })
+        .pipe(Effect.forkChild);
+      yield* waitForModelConfigWrites(2);
+
+      // Both prompts are still preparing; the cancel settles the shared turn
+      // once both drain, and neither prompt may reach the wire.
+      yield* adapter.interruptTurn(threadId);
+      yield* Fiber.join(sendTurn1Fiber);
+      yield* Fiber.join(sendTurn2Fiber);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.equal(
+        requests.filter((entry) => entry.method === "session/prompt").length,
+        0,
+        "cancelled steered prompts must never reach session/prompt",
+      );
+
+      const threadEvents = runtimeEvents.filter(
+        (event) => String(event.threadId) === String(threadId),
+      );
+      assert.equal(
+        threadEvents.filter((event) => event.type === "turn.started").length,
+        0,
+        "both prompts were cancelled before turn.started",
+      );
+      const turnCompletedEvents = threadEvents.filter((event) => event.type === "turn.completed");
+      assert.lengthOf(turnCompletedEvents, 1, "steered turn settles exactly once");
+      const turnCompleted = turnCompletedEvents[0];
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(turnCompleted.payload.state, "cancelled");
+        assert.equal(turnCompleted.payload.stopReason, "cancelled");
+      }
+
+      yield* adapter.stopSession(threadId);
+      // Live clock so the polling above advances against the mock's real-time
+      // set_config_option delay.
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("stopping a session settles pending approval waits", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
