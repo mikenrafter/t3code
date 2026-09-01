@@ -9,6 +9,7 @@ import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -1047,6 +1048,151 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       yield* adapter.stopSession(threadId);
     }),
   );
+  it.effect("settles the turn as failed when the prompt errors after turn.started", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-prompt-failure");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const turnSettled = yield* Deferred.make<void>();
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_FAIL_PROMPT: "1" }),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) === String(threadId) && event.type === "turn.completed") {
+            yield* Deferred.succeed(turnSettled, undefined).pipe(Effect.ignore);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+
+      const sendExit = yield* Effect.exit(
+        adapter.sendTurn({
+          threadId,
+          input: "this prompt fails",
+          attachments: [],
+        }),
+      );
+      assert.isTrue(Exit.isFailure(sendExit), "sendTurn should still propagate the prompt error");
+      yield* Deferred.await(turnSettled);
+
+      const threadEvents = runtimeEvents.filter(
+        (event) => String(event.threadId) === String(threadId),
+      );
+      const turnStartedIndex = threadEvents.findIndex((event) => event.type === "turn.started");
+      const turnCompletedIndex = threadEvents.findIndex((event) => event.type === "turn.completed");
+      assert.isAtLeast(turnStartedIndex, 0);
+      assert.isAbove(turnCompletedIndex, turnStartedIndex);
+
+      const turnCompleted = threadEvents[turnCompletedIndex];
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.isString(turnCompleted.payload.errorMessage);
+        assert.isNotEmpty(turnCompleted.payload.errorMessage);
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("cancelling during sendTurn preparation prevents the prompt from being sent", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-prepare-cancel");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      // Slow set_config_option responses keep the prepare phase busy long
+      // enough for interruptTurn to land before the prompt goes out.
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          T3_ACP_SET_CONFIG_OPTION_DELAY_MS: "500",
+        }),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const sendTurnFiber = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "cancel me before the prompt",
+          attachments: [],
+          modelSelection: createModelSelection(ProviderInstanceId.make("cursor"), "composer-2", [
+            { id: "fastMode", value: true },
+          ]),
+        })
+        .pipe(Effect.forkChild);
+
+      // Wait until sendTurn's config write is in flight: the mock logs the
+      // request on receipt, then delays its response by 500ms (real time),
+      // so interruptTurn is guaranteed to land inside the prepare phase.
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+          if (requests.some((entry) => entry.method === "session/set_config_option")) {
+            return;
+          }
+          yield* Effect.sleep("25 millis");
+        }
+        throw new Error("Timed out waiting for the config write to be in flight.");
+      });
+
+      yield* adapter.interruptTurn(threadId);
+      // Cancellation during preparation resolves sendTurn normally instead of
+      // surfacing an error.
+      yield* Fiber.join(sendTurnFiber);
+
+      const threadEvents = runtimeEvents.filter(
+        (event) => String(event.threadId) === String(threadId),
+      );
+      const turnCompleted = threadEvents.find((event) => event.type === "turn.completed");
+      assert.isDefined(turnCompleted);
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(turnCompleted.payload.state, "cancelled");
+      }
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.equal(
+        requests.filter((entry) => entry.method === "session/prompt").length,
+        0,
+        "cancelled-before-prompt turn must never reach session/prompt",
+      );
+
+      yield* adapter.stopSession(threadId);
+      // Live clock so the polling above advances against the mock's real-time
+      // set_config_option delay.
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("stopping a session settles pending approval waits", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
