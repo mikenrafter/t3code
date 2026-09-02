@@ -84,6 +84,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public readonly compactThread = Effect.void;
+
   public readonly interruptTurnImpl = vi.fn(
     (_turnId?: TurnId): Promise<void> => Promise.resolve(undefined),
   );
@@ -336,6 +338,47 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
+  it.effect("compacts the active Codex thread and emits compacted state", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-compact");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const compactedEventFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "thread.state.changed"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* adapter.compactThread!(threadId);
+      yield* runtime.emit({
+        id: asEventId("evt-compaction-item-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId,
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "provider-thread-1",
+          turnId: "provider-compact-turn",
+          item: {
+            id: "provider-compact-item",
+            type: "contextCompaction",
+          },
+        },
+      });
+      const event = Option.getOrThrow(yield* Fiber.join(compactedEventFiber));
+      NodeAssert.ok(event.type === "thread.state.changed");
+      NodeAssert.equal(event.payload.state, "compacted");
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("uploads feedback for the active Codex thread", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
@@ -557,6 +600,89 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("carries child model metadata through every task event", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 10)).pipe(
+        Effect.forkChild,
+      );
+
+      const cases = [
+        ["collabAgent/started", {}],
+        ["collabAgent/activity", { activityKind: "started" }],
+        ["collabAgent/turnStarted", {}],
+        ["collabAgent/turnCompleted", { turn: { status: "completed" } }],
+        ["collabAgent/statusChanged", { status: { type: "active", activeFlags: [] } }],
+        ["collabAgent/tokenUsage", { tokenUsage: { total: { totalTokens: 42 } } }],
+        ["collabAgent/item", { item: { type: "commandExecution", command: "pwd" } }],
+        ["collabAgent/closed", {}],
+        ["collabAgent/metadataUpdated", {}],
+      ] as const;
+
+      for (const [index, [method, extra]] of cases.entries()) {
+        yield* runtime.emit({
+          id: asEventId(`evt-child-model-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          payload: {
+            agentThreadId: "child-model",
+            agentPath: "/root/model-check",
+            model: " gpt-5.6-sol ",
+            effort: " high ",
+            ...extra,
+          },
+        });
+      }
+      yield* runtime.emit({
+        id: asEventId("evt-child-model-blank"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/metadataUpdated",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          agentThreadId: "child-model",
+          model: "  ",
+          effort: "",
+        },
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        [
+          "task.started",
+          "task.started",
+          "task.updated",
+          "task.updated",
+          "task.updated",
+          "task.progress",
+          "task.progress",
+          "task.updated",
+          "task.updated",
+          "task.updated",
+        ],
+      );
+      for (const event of events.slice(0, -1)) {
+        const payload = event.payload as Record<string, unknown>;
+        NodeAssert.equal(payload.model, "gpt-5.6-sol");
+        NodeAssert.equal(payload.effort, "high");
+      }
+
+      const metadataPayload = events[8]?.payload as Record<string, unknown>;
+      NodeAssert.equal("status" in metadataPayload, false);
+      const blankMetadataPayload = events[9]?.payload as Record<string, unknown>;
+      NodeAssert.equal("status" in blankMetadataPayload, false);
+      NodeAssert.equal("model" in blankMetadataPayload, false);
+      NodeAssert.equal("effort" in blankMetadataPayload, false);
+    }),
+  );
+
   it.effect("does not reactivate an idle child after a parent interaction", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -1063,6 +1189,79 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       NodeAssert.equal(firstEvent.value.payload.requestType, "command_execution_approval");
+    }),
+  );
+
+  it.effect("maps MCP elicitation requests into app access approvals", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-elicitation"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-08-24T00:00:00.000Z",
+        method: "mcpServer/elicitation/request",
+        requestKind: "mcp-elicitation",
+        requestId: ApprovalRequestId.make("req-safari"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          mode: "form",
+          message: "Allow ChatGPT to use Safari?",
+          serverName: "computer-use",
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          _meta: { app_name: "Safari", persist: ["session", "always"] },
+          requestedSchema: { type: "object", properties: {} },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "request.opened") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.payload.requestType, "mcp_elicitation_approval");
+      NodeAssert.equal(firstEvent.value.payload.appName, "Safari");
+      NodeAssert.equal(firstEvent.value.payload.detail, "Allow ChatGPT to use Safari?");
+      NodeAssert.deepStrictEqual(firstEvent.value.payload.options, [
+        { decision: "cancel", label: "Cancel" },
+        { decision: "decline", label: "Decline" },
+        { decision: "acceptForSession", label: "Always allow this session" },
+        { decision: "acceptAlways", label: "Always allow" },
+        { decision: "accept", label: "Approve" },
+      ]);
+    }),
+  );
+
+  it.effect("preserves MCP elicitation type when an app access request resolves", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-elicitation-resolved"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-08-24T00:00:00.000Z",
+        method: "item/requestApproval/decision",
+        requestKind: "mcp-elicitation",
+        requestId: ApprovalRequestId.make("req-safari"),
+        payload: { decision: "acceptAlways" },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "request.resolved") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.payload.requestType, "mcp_elicitation_approval");
+      NodeAssert.equal(firstEvent.value.payload.decision, "acceptAlways");
     }),
   );
 

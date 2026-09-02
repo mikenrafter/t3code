@@ -22,6 +22,11 @@ export const DEFAULT_TIMEOUT_MS = 4_000;
 // Auth status checks involve disk/network lookups and can be slow on first run (especially Windows)
 export const AUTH_PROBE_TIMEOUT_MS = 10_000;
 
+export const COMPACT_SLASH_COMMAND = {
+  name: "compact",
+  description: "Summarize the conversation and reduce context usage",
+} satisfies ServerProviderSlashCommand;
+
 export interface CommandResult {
   readonly stdout: string;
   readonly stderr: string;
@@ -255,5 +260,6 @@ export function buildServerProvider(input: {
 
 export const collectStreamAsString = <E>(
   stream: Stream.Stream<Uint8Array, E>,
+  options?: { readonly maxBytes?: number | undefined },
 ): Effect.Effect<string, E> =>
-  collectUint8StreamText({ stream }).pipe(Effect.map((collected) => collected.text));
+  collectUint8StreamText({ stream, ...options }).pipe(Effect.map((collected) => collected.text));

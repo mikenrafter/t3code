@@ -41,6 +41,7 @@ export type RightPanelSurface =
   | {
       id: `file:${string}`;
       kind: "file";
+      /** Workspace-relative, or absolute for a host file outside the workspace. */
       relativePath: string;
       revealLine: number | null;
       revealRequestId: number;
@@ -193,23 +194,6 @@ export function pullRequestSurface(target: {
     repository: target.repository,
     number: target.number,
   };
-}
-
-/**
- * A pull-request tab's status map with one entry set. Keyed by the surface the panel is showing
- * rather than by a key rebuilt from the status, so the tab is found again whether or not that
- * surface was opened with an environment on it. Returns the same map when the tab's own fields
- * have not changed, so a caller can skip a re-render.
- */
-export function updatePullRequestTabStatus<Status extends { state: unknown; isDraft: boolean }>(
-  statuses: Readonly<Record<string, Status>>,
-  surfaceId: string,
-  status: Status,
-): Readonly<Record<string, Status>> {
-  return statuses[surfaceId]?.state === status.state &&
-    statuses[surfaceId]?.isDraft === status.isDraft
-    ? statuses
-    : { ...statuses, [surfaceId]: status };
 }
 
 const upsertSurface = (

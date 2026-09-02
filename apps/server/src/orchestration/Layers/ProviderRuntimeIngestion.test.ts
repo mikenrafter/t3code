@@ -105,6 +105,7 @@ function createProviderServiceHarness() {
   const service: ProviderServiceShape = {
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
+    compactThread: () => unsupported(),
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
@@ -971,6 +972,29 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (thread) => thread.session?.status === "ready" && thread.session?.activeTurnId === null,
     );
+  });
+
+  it("ignores provider content deltas that cannot change thread state", async () => {
+    const harness = await createHarness();
+    const initial = await harness.readModel();
+
+    for (const streamKind of ["reasoning_text", "command_output", "file_change_output"] as const) {
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(`evt-ignored-${streamKind}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-ignored"),
+        payload: {
+          streamKind,
+          delta: "ignored output",
+        },
+      });
+    }
+
+    await harness.drain();
+    expect(await harness.readModel()).toEqual(initial);
   });
 
   it("maps canonical content delta/item completed into finalized assistant messages", async () => {
@@ -3198,6 +3222,8 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-1"),
       payload: {
         state: "compacted",
+        beforeTokens: 899_000,
+        afterTokens: 19_000,
         detail: { source: "provider" },
       },
     });
@@ -3211,7 +3237,7 @@ describe("ProviderRuntimeIngestion", () => {
     const activity = thread.activities.find(
       (candidate: ProviderRuntimeTestActivity) => candidate.kind === "context-compaction",
     );
-    expect(activity?.summary).toBe("Context compacted");
+    expect(activity?.summary).toBe("Compacted context 899K → 19K tokens");
     expect(activity?.tone).toBe("info");
   });
 

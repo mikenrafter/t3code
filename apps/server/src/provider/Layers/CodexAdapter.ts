@@ -11,6 +11,7 @@ import {
   type CanonicalItemType,
   type CanonicalRequestType,
   type CodexSettings,
+  EventId,
   ProviderDriverKind,
   type ProviderEvent,
   ProviderInstanceId,
@@ -57,6 +58,7 @@ import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
+  describeMcpElicitation,
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
@@ -302,6 +304,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_read_approval";
     case "item/fileChange/requestApproval":
       return "file_change_approval";
+    case "mcpServer/elicitation/request":
+      return "mcp_elicitation_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -325,6 +329,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_read_approval";
     case "file-change":
       return "file_change_approval";
+    case "mcp-elicitation":
+      return "mcp_elicitation_approval";
     default:
       return "unknown";
   }
@@ -530,12 +536,16 @@ function mapCollabAgentEvent(
   // finding: progress rows renamed math_one to its UUID).
   const knownName = nickname ?? pathLeaf;
   const title = knownName ?? agentThreadId;
+  const model = typeof payload.model === "string" ? payload.model.trim() : "";
+  const effort = typeof payload.effort === "string" ? payload.effort.trim() : "";
   // Identity repeated on every status patch so rows are self-describing when
   // the start row ages out of activity retention (review finding: a
   // reconstructed agent had a UUID name and no role/path).
-  const statusLinkage = {
+  const linkage = {
     role,
     ...(knownName ? { title: knownName } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     ...(agentPath ? { agentPath } : {}),
     timelineBypass: true,
   } as const;
@@ -550,13 +560,19 @@ function mapCollabAgentEvent(
             taskId,
             description: title,
             title,
-            role,
-            ...(agentPath ? { agentPath } : {}),
+            ...linkage,
             ...(typeof payload.parentThreadId === "string"
               ? { parentAgentId: payload.parentThreadId }
               : {}),
-            timelineBypass: true,
           },
+        },
+      ];
+    case "collabAgent/metadataUpdated":
+      return [
+        {
+          ...base,
+          type: "task.updated",
+          payload: { taskId, ...linkage },
         },
       ];
     case "collabAgent/activity": {
@@ -566,7 +582,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "interrupted", ...statusLinkage },
+            payload: { taskId, status: "interrupted", ...linkage },
           },
         ];
       }
@@ -583,9 +599,7 @@ function mapCollabAgentEvent(
               taskId,
               description: title,
               title,
-              role,
-              ...(agentPath ? { agentPath } : {}),
-              timelineBypass: true,
+              ...linkage,
             },
           },
         ];
@@ -599,7 +613,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status: "running", ...statusLinkage },
+          payload: { taskId, status: "running", ...linkage },
         },
       ];
     case "collabAgent/turnCompleted": {
@@ -619,7 +633,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status, ...statusLinkage },
+          payload: { taskId, status, ...linkage },
         },
       ];
     }
@@ -635,7 +649,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "failed", ...statusLinkage },
+            payload: { taskId, status: "failed", ...linkage },
           },
         ];
       }
@@ -648,7 +662,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: waiting ? "waiting" : "running", ...statusLinkage },
+            payload: { taskId, status: waiting ? "waiting" : "running", ...linkage },
           },
         ];
       }
@@ -657,7 +671,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "idle", ...statusLinkage },
+            payload: { taskId, status: "idle", ...linkage },
           },
         ];
       }
@@ -704,9 +718,8 @@ function mapCollabAgentEvent(
           payload: {
             taskId,
             description: title,
-            ...(knownName ? { title: knownName } : {}),
+            ...linkage,
             typedUsage,
-            timelineBypass: true,
           },
         },
       ];
@@ -736,9 +749,8 @@ function mapCollabAgentEvent(
           payload: {
             taskId,
             description: title,
-            ...(knownName ? { title: knownName } : {}),
+            ...linkage,
             summary,
-            timelineBypass: true,
           },
         },
       ];
@@ -748,7 +760,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status: "interrupted", ...statusLinkage },
+          payload: { taskId, status: "interrupted", ...linkage },
         },
       ];
     default:
@@ -800,6 +812,11 @@ function mapToRuntimeEvents(
       ];
     }
 
+    const elicitation =
+      event.method === "mcpServer/elicitation/request"
+        ? readPayload(EffectCodexSchema.McpServerElicitationRequestParams, event.payload)
+        : undefined;
+    const elicitationApproval = elicitation ? describeMcpElicitation(elicitation) : undefined;
     const detail = (() => {
       switch (event.method) {
         case "item/commandExecution/requestApproval": {
@@ -816,6 +833,8 @@ function mapToRuntimeEvents(
           );
           return payload?.reason ?? undefined;
         }
+        case "mcpServer/elicitation/request":
+          return elicitation?.message;
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
@@ -849,6 +868,12 @@ function mapToRuntimeEvents(
         payload: {
           requestType: toRequestTypeFromMethod(event.method),
           ...(detail ? { detail } : {}),
+          ...(elicitationApproval
+            ? {
+                appName: elicitationApproval.appName,
+                options: elicitationApproval.options,
+              }
+            : {}),
           ...(event.payload !== undefined ? { args: event.payload } : {}),
         },
       },
@@ -1127,7 +1152,18 @@ function mapToRuntimeEvents(
       ];
     }
     const completed = mapItemLifecycle(event, canonicalThreadId, "item.completed");
-    return completed ? [completed] : [];
+    if (!completed || itemType !== "context_compaction") {
+      return completed ? [completed] : [];
+    }
+    return [
+      completed,
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        eventId: EventId.make(`${event.id}:thread-compacted`),
+        type: "thread.state.changed",
+        payload: { state: "compacted" },
+      },
+    ];
   }
 
   if (
@@ -1798,8 +1834,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    // Codex ingests images only. Anything else would be base64-encoded as an
+    // image and rejected or misread; generic files reach the agent through the
+    // path line ProviderService puts in the prompt.
     const codexAttachments = yield* Effect.forEach(
-      input.attachments ?? [],
+      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
@@ -1851,6 +1890,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
       ),
     );
+
+  const compactThread: NonNullable<CodexAdapterShape["compactThread"]> = Effect.fn("compactThread")(
+    function* (threadId) {
+      const session = yield* requireSession(threadId);
+      yield* session.runtime.compactThread.pipe(
+        Effect.mapError((cause) => mapCodexRuntimeError(threadId, "thread/compact/start", cause)),
+      );
+    },
+  );
 
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
     requireSession(threadId).pipe(
@@ -1983,9 +2031,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      promptlessTurnContinuation: true,
     },
     startSession,
     sendTurn,
+    compactThread,
     interruptTurn,
     readThread,
     rollbackThread,
