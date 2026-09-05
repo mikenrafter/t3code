@@ -234,6 +234,27 @@ describe("buildCursorSnapshot", () => {
     expect(snapshot.secondary).toMatchObject({ usedPercent: 12.5, displayValue: "API 12.5%" });
   });
 
+  it("formats window remainders with both hours and minutes", () => {
+    const snapshot = buildCursorSnapshot(
+      {
+        period: {
+          planUsage: {
+            totalPercentUsed: 42.5,
+            autoPercentUsed: 30,
+            apiPercentUsed: 12.5,
+          },
+        },
+        summary: {
+          billingCycleEnd: "2026-08-22T15:24:00.000Z",
+        },
+      },
+      "person@example.com",
+      NOW_MS,
+    );
+
+    expect(snapshot.primary.resetDescription).toBe("Resets in 3h 24m");
+  });
+
   it("falls back to the summary plan fields when period.planUsage is absent", () => {
     const snapshot = buildCursorSnapshot(
       {

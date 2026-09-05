@@ -388,9 +388,11 @@ const formatCursorResetDescription = (resetsAtIso: string | null, nowMs: number)
   const days = Math.floor(deltaMs / 86_400_000);
   if (days > 0) return `Resets in ${days}d`;
   const hours = Math.floor(deltaMs / 3_600_000);
-  if (hours > 0) return `Resets in ${hours}h`;
-  const minutes = Math.max(1, Math.floor(deltaMs / 60_000));
-  return `Resets in ${minutes}m`;
+  const minutes = Math.floor((deltaMs % 3_600_000) / 60_000);
+  if (hours > 0) {
+    return minutes > 0 ? `Resets in ${hours}h ${minutes}m` : `Resets in ${hours}h`;
+  }
+  return `Resets in ${Math.max(1, minutes)}m`;
 };
 
 interface CursorUsageBodies {

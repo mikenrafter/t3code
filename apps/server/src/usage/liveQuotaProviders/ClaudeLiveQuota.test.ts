@@ -180,6 +180,20 @@ describe("buildClaudeSnapshot", () => {
     expect(snapshot.primary.resetsAt).toBeNull();
     expect(snapshot.secondary?.usedPercent).toBe(0);
   });
+
+  it("formats window remainders with both hours and minutes", () => {
+    const snapshot = buildClaudeSnapshot(
+      {
+        five_hour: { utilization: 42, resets_at: "2026-08-22T15:24:00.000Z" },
+        seven_day: { utilization: 8, resets_at: "2026-08-22T14:00:00.000Z" },
+      },
+      null,
+      NOW_MS,
+    );
+
+    expect(snapshot.primary.resetDescription).toBe("Resets in 3h 24m");
+    expect(snapshot.secondary?.resetDescription).toBe("Resets in 2h");
+  });
 });
 
 function makeHttpLayer(handler: (request: HttpClientRequest.HttpClientRequest) => Response) {
