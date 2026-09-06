@@ -27,6 +27,9 @@ the terminal drawer.
 - Select the right panel icon to open or close the right panel — the tap equivalent of swiping left.
 - Select the terminal button to open the terminal drawer.
 
+Usage and Settings pages also show the sidebar toggle in their headers on a phone, so you can reach
+the thread list without first returning to a conversation.
+
 ## Full-screen panels
 
 The right panel, open files, and the terminal drawer each take the whole screen below the header

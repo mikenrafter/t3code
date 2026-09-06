@@ -14,6 +14,7 @@ import { useSettingsRestore } from "../components/settings/SettingsPanels";
 import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
+import { WorkspaceMobileSidebarToggle } from "../components/WorkspaceMobileSidebarToggle";
 import { isElectron } from "../env";
 import {
   SettingsScopeProvider,
@@ -156,15 +157,18 @@ function SettingsContentLayout() {
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         <WorkspacePageHeader electron={isElectron}>
-          <div className="flex w-full items-center gap-3">
-            <SettingsBreadcrumb
-              pathname={location.pathname}
-              scope={
-                showScope
-                  ? { value: search, groups, environments, onChange: selectScope }
-                  : undefined
-              }
-            />
+          <div className="flex w-full min-w-0 items-center gap-3">
+            <WorkspaceMobileSidebarToggle />
+            <div className="min-w-0 flex-1">
+              <SettingsBreadcrumb
+                pathname={location.pathname}
+                scope={
+                  showScope
+                    ? { value: search, groups, environments, onChange: selectScope }
+                    : undefined
+                }
+              />
+            </div>
             {location.pathname === "/settings/general" ? (
               <div className="ms-auto flex shrink-0 items-center">
                 <RestoreDeviceDefaultsButton
