@@ -105,6 +105,7 @@ import {
   WorkspaceBreadcrumbSeparator,
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { WorkspaceMobileSidebarToggle } from "../WorkspaceMobileSidebarToggle";
 import {
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
   SettingResetButton,
@@ -183,7 +184,12 @@ export function ProjectSettingsPage({ projectKey }: { projectKey: string }) {
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         <WorkspacePageHeader electron={isElectron}>
-          <ProjectSettingsBreadcrumb projectKey={projectKey} />
+          <div className="flex w-full min-w-0 items-center gap-3">
+            <WorkspaceMobileSidebarToggle />
+            <div className="min-w-0 flex-1">
+              <ProjectSettingsBreadcrumb projectKey={projectKey} />
+            </div>
+          </div>
         </WorkspacePageHeader>
         <ProjectSettingsPanel projectKey={projectKey} />
       </div>

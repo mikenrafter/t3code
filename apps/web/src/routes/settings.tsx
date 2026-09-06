@@ -14,6 +14,7 @@ import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
 import { Button } from "../components/ui/button";
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
+import { WorkspaceMobileSidebarToggle } from "../components/WorkspaceMobileSidebarToggle";
 import { isElectron } from "../env";
 
 function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
@@ -72,8 +73,11 @@ function SettingsContentLayout() {
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         <WorkspacePageHeader electron={isElectron}>
-          <div className="flex w-full items-center gap-3">
-            <SettingsBreadcrumb pathname={location.pathname} />
+          <div className="flex w-full min-w-0 items-center gap-3">
+            <WorkspaceMobileSidebarToggle />
+            <div className="min-w-0 flex-1">
+              <SettingsBreadcrumb pathname={location.pathname} />
+            </div>
             {showRestoreDefaults ? (
               <div className="ms-auto flex items-center gap-2">
                 <RestoreDefaultsButton onRestored={handleRestored} />

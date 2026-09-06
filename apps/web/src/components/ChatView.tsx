@@ -303,6 +303,7 @@ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
+import { resolvePanelLayoutControlsHost } from "./chat/panelLayoutControlsPlacement";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
@@ -1856,8 +1857,6 @@ function ChatViewContent(props: ChatViewProps) {
     panelAnimationDurationMs,
   );
   const rightPanelPresent = rightPanelPresence.present;
-  const rightPanelControlsInPanel =
-    rightPanelPresent && (!shouldUseRightPanelSheet || rightPanelOpen);
   const renderedRightPanelSurface = rightPanelPresence.value?.activeSurface ?? null;
   const renderedRightPanelSurfaces = rightPanelPresence.value?.surfaces ?? [];
   const canMaximizeRightPanel = rightPanelOpen && !shouldUseRightPanelSheet;
@@ -7242,6 +7241,10 @@ function ChatViewContent(props: ChatViewProps) {
     return <NoActiveThreadState />;
   }
 
+  const panelLayoutControlsHost = resolvePanelLayoutControlsHost({
+    shouldUseRightPanelSheet,
+    rightPanelOpen,
+  });
   const panelToggleControls = (
     <PanelLayoutControls
       terminalAvailable={activeProject !== null}
@@ -7260,23 +7263,27 @@ function ChatViewContent(props: ChatViewProps) {
     />
   );
   // Swiping is the primary way to switch panels on mobile, but the toggle stays in the header as
-  // a tap fallback: a swipe can be swallowed by a scroll gesture the user started first.
-  const mobileHeaderPanelControls = (
-    <PanelLayoutControls
-      touchFriendly
-      terminalAvailable={activeProject !== null}
-      terminalOpen={terminalUiState.terminalOpen}
-      terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
-      rightPanelAvailable={activeProject !== null}
-      rightPanelOpen={rightPanelOpen}
-      rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
-      liveAgentCount={
-        rightPanelOpen && activeRightPanelSurface?.kind === "agents" ? 0 : agentPanelModel.liveCount
-      }
-      onToggleTerminal={toggleTerminalVisibility}
-      onToggleRightPanel={toggleRightPanel}
-    />
-  );
+  // a tap fallback: a swipe can be swallowed by a scroll gesture the user started first. Mount it
+  // in exactly one place — never alongside the fixed cluster or the open sheet tab bar.
+  const mobileHeaderPanelControls =
+    panelLayoutControlsHost === "mobile-header" ? (
+      <PanelLayoutControls
+        touchFriendly
+        terminalAvailable={activeProject !== null}
+        terminalOpen={terminalUiState.terminalOpen}
+        terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
+        rightPanelAvailable={activeProject !== null}
+        rightPanelOpen={rightPanelOpen}
+        rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
+        liveAgentCount={
+          rightPanelOpen && activeRightPanelSurface?.kind === "agents"
+            ? 0
+            : agentPanelModel.liveCount
+        }
+        onToggleTerminal={toggleTerminalVisibility}
+        onToggleRightPanel={toggleRightPanel}
+      />
+    ) : undefined;
   const panelLayoutControls = (
     <div
       className={cn(
@@ -7473,7 +7480,7 @@ function ChatViewContent(props: ChatViewProps) {
           reserveNativeControls={reserveTitleBarControlInset && !inlineRightPanelOwnsTitleBar}
           className="relative bg-background"
         >
-          {!shouldUseRightPanelSheet || !rightPanelControlsInPanel ? panelLayoutControls : null}
+          {panelLayoutControlsHost === "fixed" ? panelLayoutControls : null}
           <ChatHeader
             {...(!supportsPullRequests || activeProjectRepository === null
               ? {}
@@ -7494,9 +7501,7 @@ function ChatViewContent(props: ChatViewProps) {
             keybindings={keybindings}
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}
-            mobilePanelLayoutControls={
-              shouldUseRightPanelSheet ? mobileHeaderPanelControls : undefined
-            }
+            mobilePanelLayoutControls={mobileHeaderPanelControls}
             gitCwd={gitCwd}
             onNewThreadInProject={handleNewThreadInActiveProject}
             onRunProjectScript={runProjectScript}
@@ -7934,7 +7939,7 @@ function ChatViewContent(props: ChatViewProps) {
             // right inset plus mr-px), so the cluster does not creep when
             // the sheet opens.
             layoutControls={
-              rightPanelOpen ? (
+              panelLayoutControlsHost === "sheet" ? (
                 <div className="mr-px flex items-center">{panelToggleControls}</div>
               ) : null
             }

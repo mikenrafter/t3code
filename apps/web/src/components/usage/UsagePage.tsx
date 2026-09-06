@@ -32,6 +32,7 @@ import {
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { WorkspaceMobileSidebarToggle } from "../WorkspaceMobileSidebarToggle";
 import { LiveQuotaCards } from "./LiveQuotaCards";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
@@ -115,6 +116,7 @@ export function UsagePage() {
       : `${formatDayShort(window.sinceDay)} to ${formatDayShort(window.untilDay)}`;
   const topbarContent = (
     <div className="flex w-full min-w-0 items-center gap-3">
+      <WorkspaceMobileSidebarToggle />
       <WorkspaceBreadcrumb ariaLabel="Usage breadcrumb" className="min-w-0">
         <WorkspaceBreadcrumbItem current>
           <h1>Usage</h1>
