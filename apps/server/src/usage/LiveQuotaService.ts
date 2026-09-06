@@ -33,6 +33,7 @@ import {
 } from "../provider/Services/ProviderInstanceRegistry.ts";
 import * as ClaudeLiveQuota from "./liveQuotaProviders/ClaudeLiveQuota.ts";
 import * as CursorLiveQuota from "./liveQuotaProviders/CursorLiveQuota.ts";
+import * as OpenAiLiveQuota from "./liveQuotaProviders/OpenAiLiveQuota.ts";
 
 /** A fully-resolved live-quota reader: no ambient context, never fails. */
 export type LiveQuotaAdapter = () => Effect.Effect<LiveQuotaResult>;
@@ -78,7 +79,8 @@ export const make = Effect.gen(function* () {
     resolveCursorAccountEmail(providerInstanceRegistry),
   );
   const claudeAdapter = yield* ClaudeLiveQuota.make;
-  const adapters: ReadonlyArray<LiveQuotaAdapter> = [cursorAdapter, claudeAdapter];
+  const openAiAdapter = yield* OpenAiLiveQuota.make;
+  const adapters: ReadonlyArray<LiveQuotaAdapter> = [cursorAdapter, claudeAdapter, openAiAdapter];
 
   const readSnapshots: Effect.Effect<ReadonlyArray<LiveQuotaResult>> = Effect.all(
     adapters.map((adapter) => adapter()),

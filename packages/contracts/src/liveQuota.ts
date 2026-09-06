@@ -19,7 +19,7 @@ import * as Schema from "effect/Schema";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-export const LiveQuotaProviderKind = Schema.Literals(["cursor", "claude"]);
+export const LiveQuotaProviderKind = Schema.Literals(["cursor", "claude", "openai"]);
 export type LiveQuotaProviderKind = typeof LiveQuotaProviderKind.Type;
 
 /**
