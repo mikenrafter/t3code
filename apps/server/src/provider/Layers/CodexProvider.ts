@@ -404,6 +404,22 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   return { client, initialize };
 });
 
+/** Reads the signed-in Codex account's current primary and secondary limits. */
+export const requestCodexRateLimits = Effect.fn("requestCodexRateLimits")(function* (input: {
+  readonly binaryPath: string;
+  readonly homePath?: string | undefined;
+  readonly launchArgs?: string | undefined;
+  readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv | undefined;
+}) {
+  const { client } = yield* withCodexAppServerClient(input);
+  const [account, rateLimits] = yield* Effect.all([
+    client.request("account/read", {}),
+    client.request("account/rateLimits/read", undefined),
+  ]);
+  return { account, rateLimits };
+});
+
 const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (input: {
   readonly binaryPath: string;
   readonly homePath?: string;

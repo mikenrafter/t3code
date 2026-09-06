@@ -3,16 +3,18 @@ import { RefreshCwIcon } from "lucide-react";
 
 import { cn } from "../../lib/utils";
 import { RedactedSensitiveText } from "../settings/RedactedSensitiveText";
-import { ClaudeAI, CursorIcon, type Icon } from "../Icons";
+import { ClaudeAI, CursorIcon, OpenAI, type Icon } from "../Icons";
 
 const PROVIDER_ICON: Record<LiveQuotaProviderKind, Icon> = {
   cursor: CursorIcon,
   claude: ClaudeAI,
+  openai: OpenAI,
 };
 
 const PROVIDER_LABEL: Record<LiveQuotaProviderKind, string> = {
   cursor: "Cursor",
   claude: "Claude",
+  openai: "OpenAI",
 };
 
 /**
