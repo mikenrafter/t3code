@@ -82,7 +82,17 @@ describe("buildClaudeSnapshot", () => {
     );
 
     expect(snapshot.primary.resetDescription).toBe("Resets in 3h 24m");
-    expect(snapshot.secondary?.resetDescription).toBe("Resets in 2h");
+    expect(snapshot.secondary?.resetDescription).toBe("Resets in 2h 0m");
+  });
+
+  it("rounds day-based window remainders", () => {
+    const snapshot = buildClaudeSnapshot(
+      { seven_day: { utilization: 8, resets_at: "2026-08-24T00:00:00.000Z" } },
+      null,
+      NOW_MS,
+    );
+
+    expect(snapshot.secondary?.resetDescription).toBe("Resets in 2d");
   });
 });
 

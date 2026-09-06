@@ -123,6 +123,36 @@ describe("buildCursorSnapshot", () => {
 
     expect(snapshot.primary.resetDescription).toBe("Resets in 3h 24m");
   });
+
+  it("rounds day-based window remainders", () => {
+    const snapshot = buildCursorSnapshot(
+      { period: {}, summary: { billingCycleEnd: "2026-08-24T00:00:00.000Z" } },
+      "person@example.com",
+      NOW_MS,
+    );
+
+    expect(snapshot.primary.resetDescription).toBe("Resets in 2d");
+  });
+
+  it("falls back to the summary plan fields when period.planUsage is absent", () => {
+    const snapshot = buildCursorSnapshot(
+      {
+        period: {},
+        summary: {
+          individualUsage: {
+            plan: { totalPercentUsed: 10, autoPercentUsed: 5, apiPercentUsed: 1 },
+          },
+        },
+      },
+      null,
+      NOW_MS,
+    );
+
+    expect(snapshot.primary.usedPercent).toBe(5);
+    expect(snapshot.secondary?.usedPercent).toBe(1);
+    expect(snapshot.primary.resetsAt).toBeNull();
+    expect(snapshot.primary.resetDescription).toBe("Billing cycle");
+  });
 });
 
 describe("computeCursorResult", () => {

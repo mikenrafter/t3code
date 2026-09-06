@@ -20,5 +20,16 @@ describe("OpenAiLiveQuota", () => {
     expect(snapshot.primary.displayValue).toBe("25%");
     expect(snapshot.secondary?.windowMinutes).toBe(10_080);
     expect(snapshot.secondary?.displayValue).toBe("50%");
+    expect(snapshot.secondary?.resetDescription).toBe("Resets in 7d");
+  });
+
+  it("formats sub-day windows with hours and minutes", () => {
+    const snapshot = buildOpenAiSnapshot(
+      { rateLimits: { primary: { usedPercent: 25, resetsAt: 1_800_000_000 } } },
+      null,
+      1_799_982_000_000,
+    );
+
+    expect(snapshot.primary.resetDescription).toBe("Resets in 5h 0m");
   });
 });
