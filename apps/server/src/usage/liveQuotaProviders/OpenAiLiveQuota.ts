@@ -29,9 +29,10 @@ const formatResetDescription = (resetsAt: number | null, nowMs: number): string 
   if (resetsAt === null) return "No active window";
   const remaining = resetsAt - nowMs;
   if (remaining <= 0) return "Resets soon";
+  if (remaining >= 86_400_000) return `Resets in ${Math.round(remaining / 86_400_000)}d`;
   const hours = Math.floor(remaining / 3_600_000);
   const minutes = Math.floor((remaining % 3_600_000) / 60_000);
-  return hours > 0 ? `Resets in ${hours}h ${minutes}m` : `Resets in ${Math.max(1, minutes)}m`;
+  return `Resets in ${hours}h ${minutes}m`;
 };
 
 const buildSlot = (
