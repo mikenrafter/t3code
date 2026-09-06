@@ -22,6 +22,17 @@
         lib = nixpkgs.lib;
         agents = llm-agents.packages.${system};
 
+        # Electron comes from llm-agents' own nixpkgs pin (unfree). This branch
+        # depends on Electron 43.x; the llm-agents packaging still wired into
+        # this flake (and into phoe-nix via follows) takes an `electron_41`
+        # callPackage arg and aborts when upstream's major is newer. Pass
+        # electron_43 through that slot. Drop this override once the followed
+        # llm-agents rev includes "t3code: switch to electron_43" (3e108f2a).
+        agentsPkgs = import llm-agents.inputs.nixpkgs {
+          inherit system;
+          config.allowUnfree = true;
+        };
+
         # llm-agents pins the upstream v0.0.33 tarball together with the pnpm
         # store hash that goes with it. This branch has been synced with t3code
         # main since that tag, so pnpm-lock.yaml gained dependencies the pinned
@@ -33,13 +44,17 @@
         # native/ is unchanged from v0.0.33, so the Rust resource-monitor and
         # its cargoHash are left on the upstream source.
         t3code = agents.t3code.override {
-          t3code-unwrapped = agents.t3code.unwrapped.overrideAttrs (old: {
-            src = self;
-            pnpmDeps = old.pnpmDeps.override {
-              src = self;
-              hash = "sha256-t/hmpXdYPnBFx18A6NrSL4zSvVnUDIjIPtLjGOzoaDk=";
-            };
-          });
+          t3code-unwrapped =
+            (agents.t3code.unwrapped.override {
+              electron_41 = agentsPkgs.electron_43;
+            }).overrideAttrs
+              (old: {
+                src = self;
+                pnpmDeps = old.pnpmDeps.override {
+                  src = self;
+                  hash = "sha256-t/hmpXdYPnBFx18A6NrSL4zSvVnUDIjIPtLjGOzoaDk=";
+                };
+              });
         };
       in
       {
