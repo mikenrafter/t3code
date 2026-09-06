@@ -113,6 +113,7 @@ import {
 import { WorkspacePageContainer } from "../components/WorkspacePageContainer";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
+import { WorkspaceMobileSidebarToggle } from "../components/WorkspaceMobileSidebarToggle";
 import { isElectron } from "../env";
 import { resolveShortcutCommand } from "../keybindings";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -2294,6 +2295,7 @@ function PullRequestsColumn({
         reserveNativeControls={!rightPanelOpen}
         className="relative bg-background"
       >
+        <WorkspaceMobileSidebarToggle />
         {titlebarControls}
         {condensed ? (
           <WorkspaceBreadcrumb ariaLabel="Pull request scope" className="overflow-hidden">

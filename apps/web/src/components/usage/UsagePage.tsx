@@ -59,6 +59,7 @@ import {
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { WorkspaceMobileSidebarToggle } from "../WorkspaceMobileSidebarToggle";
 import { LiveQuotaCards } from "./LiveQuotaCards";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
@@ -207,6 +208,7 @@ const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
       : `${formatDayShort(window.sinceDay)} to ${formatDayShort(window.untilDay)}`;
   const topbarContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 py-2 xl:flex">
+      <WorkspaceMobileSidebarToggle />
       <WorkspaceBreadcrumb ariaLabel="Usage breadcrumb" className="col-span-2 min-w-0">
         <WorkspaceBreadcrumbItem>
           <h1>Usage</h1>
