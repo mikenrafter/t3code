@@ -167,14 +167,10 @@ const formatClaudeResetDescription = (resetsAtIso: string | null, nowMs: number)
 
   const deltaMs = resetMs - nowMs;
   if (deltaMs <= 0) return "Resets soon";
-  const days = Math.floor(deltaMs / 86_400_000);
-  if (days > 0) return `Resets in ${days}d`;
+  if (deltaMs >= 86_400_000) return `Resets in ${Math.round(deltaMs / 86_400_000)}d`;
   const hours = Math.floor(deltaMs / 3_600_000);
   const minutes = Math.floor((deltaMs % 3_600_000) / 60_000);
-  if (hours > 0) {
-    return minutes > 0 ? `Resets in ${hours}h ${minutes}m` : `Resets in ${hours}h`;
-  }
-  return `Resets in ${Math.max(1, minutes)}m`;
+  return `Resets in ${hours}h ${minutes}m`;
 };
 
 interface ClaudeUsageBody {
