@@ -7,6 +7,7 @@ import { codexHistoryEntry, readCodexAgentHistory } from "./codexAgentHistory.ts
 
 const isAgentHistoryResult = Schema.is(OrchestrationGetAgentHistoryResult);
 
+/** Build native snapshots with explicit ancestry and enough items to exercise page boundaries. */
 function thread(id: string, parent: string | null, count = 1): V2ThreadReadResponse {
   return {
     thread: {
@@ -52,7 +53,7 @@ describe("saved Codex agent history", () => {
         id: "edit",
         status: "completed",
         changes: [
-          { path: "src/X.jsx", kind: { type: "update", movePath: null }, diff: "-old\n+new" },
+          { path: "src/X.jsx", kind: { type: "update", move_path: null }, diff: "-old\n+new" },
         ],
       }),
     ).toMatchObject({

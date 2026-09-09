@@ -301,25 +301,33 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       const threadId = ThreadId.make("stopped-grok-history");
       assert.isFalse(yield* adapter.hasSession(threadId));
       assert.isDefined(adapter.getAgentHistory);
-      const result = yield* adapter.getAgentHistory!({
+      const input = {
         threadId,
         agentId: "child",
         offset: 0,
         cwd: dir,
         resumeCursor: { schemaVersion: 1, sessionId: "parent" },
-      });
+      };
+      const result = yield* adapter.getAgentHistory!(input);
+      yield* adapter.getAgentHistory!(input);
       assert.equal(result.status, "ready");
       assert.equal(result.entries[0]?.detail, "Saved child output");
       assert.isFalse(yield* adapter.hasSession(threadId));
       const calls = yield* Effect.promise(() => readJsonLines(log));
       assert.deepEqual(
         calls.filter((call) => call.method !== "closed").map((call) => call.method),
-        ["initialize", "_x.ai/session/state", "_x.ai/session/updates"],
+        [
+          "initialize",
+          "_x.ai/session/state",
+          "_x.ai/session/updates",
+          "_x.ai/session/state",
+          "_x.ai/session/updates",
+        ],
       );
       assert.isTrue(
         calls.filter((call) => call.method !== "closed").every((call) => call.home === dir),
       );
-      if (!windowsHost) assert.isTrue(calls.some((call) => call.method === "closed"));
+      assert.isFalse(calls.some((call) => call.method === "closed"));
     }),
   );
   it.effect("sends runtime context with the current model without changing saved prompts", () =>

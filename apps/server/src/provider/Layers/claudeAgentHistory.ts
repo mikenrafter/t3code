@@ -27,7 +27,7 @@ const ContentBlock = Schema.Struct({
   content: Schema.optionalKey(Schema.Unknown),
   is_error: Schema.optionalKey(Schema.Boolean),
 });
-const decodeMessage = Schema.decodeUnknownSync(
+const decodeMessage = Schema.decodeUnknownOption(
   Schema.Struct({
     content: Schema.Union([Schema.String, Schema.Array(ContentBlock)]),
   }),
@@ -41,6 +41,7 @@ const decodeTextContent = Schema.decodeUnknownOption(
   ),
 );
 
+/** Return an empty history response with a recoverable explanation for the client. */
 const unavailable = (message: string): OrchestrationGetAgentHistoryResult => ({
   status: "unavailable",
   entries: [],
@@ -48,6 +49,7 @@ const unavailable = (message: string): OrchestrationGetAgentHistoryResult => ({
   message,
 });
 
+/** Missing transcript directories mean no saved history; other filesystem errors remain visible. */
 async function directoryEntries(path: string) {
   try {
     return await NodeFSP.readdir(path, { withFileTypes: true });
@@ -57,6 +59,7 @@ async function directoryEntries(path: string) {
   }
 }
 
+/** Use lstat so a symlink cannot redirect traversal outside the configured transcript store. */
 async function isDirectory(path: string) {
   try {
     return (await NodeFSP.lstat(path)).isDirectory();
@@ -84,6 +87,7 @@ async function findTranscript(
   return null;
 }
 
+/** Extract only textual tool results; image and other binary blocks are not activity text. */
 function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   const blocks = decodeTextContent(content);
@@ -92,8 +96,11 @@ function resultText(content: unknown): string {
     : "";
 }
 
+/** Skip unsupported transcript records while retaining the rest of the saved conversation. */
 export function claudeHistoryEntries(message: SessionMessage): AgentHistoryEntry[] {
-  const { content } = decodeMessage(message.message);
+  const decoded = decodeMessage(message.message);
+  if (decoded._tag === "None") return [];
+  const { content } = decoded.value;
   if (typeof content === "string")
     return content
       ? [

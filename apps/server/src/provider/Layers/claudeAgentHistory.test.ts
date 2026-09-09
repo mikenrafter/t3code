@@ -17,6 +17,7 @@ afterEach(async () => {
   await NodeFSP.rm(configDir, { recursive: true, force: true });
 });
 
+/** Write a linked SDK transcript so reader tests exercise real chain reconstruction. */
 async function save(agentId: string, contents: ReadonlyArray<unknown>, nested = false) {
   const directory = NodePath.join(
     configDir,
@@ -57,6 +58,16 @@ const read = (agentId = "child", offset = 0) =>
   readClaudeAgentHistory({ configDir, sessionId, agentId, offset });
 
 describe("Claude saved agent history", () => {
+  it("skips malformed messages without losing subsequent valid history", async () => {
+    await save("child", [
+      "prompt",
+      null,
+      [{ type: "text", text: 42 }],
+      [{ type: "text", text: "Valid answer" }],
+    ]);
+    const result = await read();
+    expect(result.entries.map((entry) => entry.detail)).toEqual(["prompt", "Valid answer"]);
+  });
   it("identifies file edits without putting patch content in the title", async () => {
     await save("child", [
       "prompt",

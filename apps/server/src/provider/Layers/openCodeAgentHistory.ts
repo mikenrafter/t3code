@@ -3,6 +3,7 @@ import type { AgentHistoryEntry, OrchestrationGetAgentHistoryResult } from "@t3t
 import * as Effect from "effect/Effect";
 import { agentHistoryEntry, collectAgentHistory } from "./agentHistory.ts";
 
+/** Keep message order while normalizing displayable parts; internal step and token metadata stay hidden. */
 function historyEntry(role: Message["role"], part: Part): AgentHistoryEntry | null {
   switch (part.type) {
     case "text":
