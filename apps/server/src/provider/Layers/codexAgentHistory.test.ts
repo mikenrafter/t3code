@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import type { V2ThreadReadResponse } from "effect-codex-app-server/schema";
 import { OrchestrationGetAgentHistoryResult } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { readCodexAgentHistory } from "./codexAgentHistory.ts";
+import { codexHistoryEntry, readCodexAgentHistory } from "./codexAgentHistory.ts";
 
 const isAgentHistoryResult = Schema.is(OrchestrationGetAgentHistoryResult);
 
@@ -45,6 +45,27 @@ function thread(id: string, parent: string | null, count = 1): V2ThreadReadRespo
 }
 
 describe("saved Codex agent history", () => {
+  it("uses native reasoning text when no summary is supplied and omits empty markers", () => {
+    expect(
+      codexHistoryEntry({
+        type: "reasoning",
+        id: "r",
+        summary: [],
+        content: ["Checking the schema."],
+      }),
+    ).toMatchObject({ title: "Reasoning", detail: "Checking the schema." });
+    expect(
+      codexHistoryEntry({
+        type: "reasoning",
+        id: "r",
+        summary: ["Reviewing validation."],
+        content: ["Other text"],
+      }),
+    ).toMatchObject({ title: "Reasoning summary", detail: "Reviewing validation." });
+    expect(
+      codexHistoryEntry({ type: "reasoning", id: "r", summary: [" "], content: [] }),
+    ).toBeNull();
+  });
   it.effect("reads a stopped nested child's history with bounded, nonoverlapping pages", () =>
     Effect.gen(function* () {
       const calls: Array<[string, boolean]> = [];
