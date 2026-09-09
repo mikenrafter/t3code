@@ -7,6 +7,50 @@ const envelope = (update: Record<string, unknown>, sessionId = "child") => ({
   params: { sessionId, update },
 });
 describe("Grok saved child history", () => {
+  it.effect("skips malformed update envelopes but preserves valid history", () =>
+    Effect.gen(function* () {
+      const result = yield* readGrokAgentHistory({
+        parentSessionId: "parent",
+        agentId: "child",
+        cwd: "/workspace",
+        offset: 0,
+        request: (method) =>
+          Effect.succeed(
+            method.endsWith("state")
+              ? { summary: { parent_session_id: "parent", session_kind: "subagent" } }
+              : {
+                  updates: [
+                    null,
+                    { method: "session/update", params: null },
+                    {},
+                    envelope({
+                      sessionUpdate: "agent_message_chunk",
+                      content: { type: "text", text: "Valid answer" },
+                    }),
+                  ],
+                },
+          ),
+      });
+      expect(result.entries.map((entry) => entry.detail)).toEqual(["Valid answer"]);
+    }),
+  );
+  it.effect("fails closed when the CLI omits ancestry metadata", () =>
+    Effect.gen(function* () {
+      const methods: string[] = [];
+      const result = yield* readGrokAgentHistory({
+        parentSessionId: "parent",
+        agentId: "child",
+        cwd: "/workspace",
+        offset: 0,
+        request: (method) => {
+          methods.push(method);
+          return Effect.succeed({});
+        },
+      });
+      expect(result.status).toBe("unavailable");
+      expect(methods).toEqual(["_x.ai/session/state"]);
+    }),
+  );
   it("retains edit classification through result-only updates", () => {
     const entries = grokHistoryEntries(
       [

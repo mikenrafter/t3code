@@ -18,10 +18,12 @@ export function isLiveAgent(agent: RuntimeSubagent): boolean {
   return !isTerminalSubagentStatus(agent.status) && agent.status !== "idle";
 }
 
+/** Flatten phase members in their displayed order, followed by unphased members. */
 export function workflowMembers(group: AgentPanelWorkflowGroup): ReadonlyArray<RuntimeSubagent> {
   return [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
 }
 
+/** Give fleet totals and finished grouping the same roster order as the panel. */
 export function allPanelAgents(model: AgentPanelModel): ReadonlyArray<RuntimeSubagent> {
   return [...model.workflows.flatMap(workflowMembers), ...model.directAgents];
 }

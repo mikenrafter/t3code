@@ -10,21 +10,27 @@ import { agentHistoryEntry, collectAgentHistory } from "./agentHistory.ts";
 
 const RecordValue = Schema.Record(Schema.String, Schema.Unknown);
 const decodeRecord = Schema.decodeUnknownOption(RecordValue);
+/** Treat non-object extension payloads as absent rather than casting untrusted protocol data. */
 function record(value: unknown) {
   const decoded = decodeRecord(value);
   return decoded._tag === "Some" ? decoded.value : {};
 }
+/** Keep unknown extension values out of display text. */
 function text(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 const State = Schema.Struct({
-  summary: Schema.Struct({
-    parent_session_id: Schema.optional(Schema.String),
-    session_kind: Schema.optional(Schema.String),
-  }),
+  summary: Schema.optional(
+    Schema.Struct({
+      parent_session_id: Schema.optional(Schema.String),
+      session_kind: Schema.optional(Schema.String),
+    }),
+  ),
 });
+const UpdateEnvelope = Schema.Struct({ method: Schema.String, params: RecordValue });
+const decodeUpdateEnvelope = Schema.decodeUnknownOption(UpdateEnvelope);
 const Updates = Schema.Struct({
-  updates: Schema.Array(Schema.Struct({ method: Schema.String, params: RecordValue })),
+  updates: Schema.Array(Schema.Unknown),
 });
 export const GrokSubagentNotification = Schema.Struct({
   sessionId: Schema.String,
@@ -81,6 +87,7 @@ export function grokSubagentTask(
   }
 }
 
+/** Read ACP text content without exposing non-text blocks as serialized objects. */
 function contentText(value: unknown): string {
   if (!Array.isArray(value)) return text(record(value).text);
   return value
@@ -94,7 +101,7 @@ function contentText(value: unknown): string {
 
 /** Fold ACP chunks and tool updates before paging visible entries. */
 export function grokHistoryEntries(
-  updates: (typeof Updates.Type)["updates"],
+  updates: ReadonlyArray<typeof UpdateEnvelope.Type>,
   childId: string,
 ): AgentHistoryEntry[] {
   const entries: AgentHistoryEntry[] = [];
@@ -164,6 +171,7 @@ export function grokHistoryEntries(
   return entries;
 }
 
+/** Verify every parent link before retrieving a child’s persisted, rewind-filtered updates. */
 export const readGrokAgentHistory = Effect.fn("readGrokAgentHistory")(function* <E>(input: {
   parentSessionId: string;
   agentId: string;
@@ -189,9 +197,9 @@ export const readGrokAgentHistory = Effect.fn("readGrokAgentHistory")(function* 
     const state = yield* input
       .request("_x.ai/session/state", { sessionId: current, cwd: input.cwd })
       .pipe(Effect.flatMap(Schema.decodeUnknownEffect(State)));
-    if (current === input.agentId && !state.summary.session_kind?.startsWith("subagent"))
+    if (current === input.agentId && !state.summary?.session_kind?.startsWith("subagent"))
       return unavailable("The selected session is not a saved subagent.");
-    if (!state.summary.parent_session_id)
+    if (!state.summary?.parent_session_id)
       return unavailable("This agent does not belong to the thread.");
     current = state.summary.parent_session_id;
   }
@@ -199,7 +207,13 @@ export const readGrokAgentHistory = Effect.fn("readGrokAgentHistory")(function* 
   const response = yield* input
     .request("_x.ai/session/updates", { sessionId: input.agentId, cwd: input.cwd })
     .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Updates)));
-  const entries = grokHistoryEntries(response.updates, input.agentId);
+  const entries = grokHistoryEntries(
+    response.updates.flatMap((update) => {
+      const decoded = decodeUpdateEnvelope(update);
+      return decoded._tag === "Some" ? [decoded.value] : [];
+    }),
+    input.agentId,
+  );
   const page = collectAgentHistory(input);
   for (const entry of entries) {
     if (page.add(entry)) break;

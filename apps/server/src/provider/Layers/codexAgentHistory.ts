@@ -7,6 +7,7 @@ import type {
 
 import { agentHistoryEntry, collectAgentHistory } from "./agentHistory.ts";
 
+/** Normalize native items for all history views, preserving displayable reasoning and bounded tool detail. */
 export function codexHistoryEntry(
   item: V2ThreadReadResponse__ThreadItem,
 ): AgentHistoryEntry | null {
@@ -88,6 +89,7 @@ export function codexHistoryEntry(
   }
 }
 
+/** Report an unverified child without returning any of its saved content. */
 const unavailable = (message: string): OrchestrationGetAgentHistoryResult => ({
   status: "unavailable",
   entries: [],
