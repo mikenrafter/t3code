@@ -47,3 +47,14 @@ restart before T3 Code can see configuration changes.
 
 Existing threads keep their selected model and options even when it disappears
 from the catalog. If OpenCode rejects that model, select an available one and retry.
+
+## Agent history
+
+In the web or desktop Agents panel, expand an agent and choose **Open full
+activity** to read its saved conversation and tool activity. History comes from
+the OpenCode server configured for that environment and can be read after the
+agent stops. Opening history does not resume the agent.
+
+Use **Refresh** for newer activity and **Next** for more entries. Agents created
+before T3 Code began tracking OpenCode child sessions do not appear retroactively
+in the panel.
