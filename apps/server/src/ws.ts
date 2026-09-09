@@ -38,7 +38,8 @@ import {
   OrchestrationSearchThreadsError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
-  type ProjectId,
+  OrchestrationGetAgentHistoryError,
+  ProjectId,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
@@ -1342,6 +1343,19 @@ const makeWsRpcLayer = (
                       message: "Failed to dispatch orchestration command",
                       cause,
                     }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.getAgentHistory]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getAgentHistory,
+            providerService.getAgentHistory(input).pipe(
+              Effect.mapError(
+                () =>
+                  new OrchestrationGetAgentHistoryError({
+                    message: "Could not load agent history from this environment.",
+                  }),
               ),
             ),
             { "rpc.aggregate": "orchestration" },

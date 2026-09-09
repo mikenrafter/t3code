@@ -234,3 +234,12 @@ If the preset needs different Claude files, give it a different `CLAUDE_CONFIG_D
 different API keys, base URLs, or router settings, use Environment variables.
 
 Do not put environment variable assignments in `Launch arguments`.
+
+## Subagent history
+
+On web and desktop, open the Agents panel, expand a subagent, and choose
+**Open full activity** to read its saved messages and tool activity. History
+comes from the configured Claude instance on the connected computer and can
+remain available after the session stops. Opening it does not resume Claude.
+Use **Refresh** for newly saved activity and **Next** for subsequent pages.
+Long entries are shortened and marked.

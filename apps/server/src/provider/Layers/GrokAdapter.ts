@@ -81,6 +81,12 @@ import {
 import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
+import {
+  GrokSubagentNotification,
+  grokSubagentTask,
+  readGrokAgentHistory,
+} from "./grokAgentHistory.ts";
+
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
 const PROVIDER = ProviderDriverKind.make("grok");
@@ -1128,6 +1134,28 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 ),
               { discard: true },
             );
+            yield* Effect.forEach(
+              ["x.ai/session/update", "_x.ai/session/update"],
+              (method) =>
+                acp.handleExtNotification(method, GrokSubagentNotification, (notification) =>
+                  mapAcpCallbackFailure(
+                    Effect.gen(function* () {
+                      const ctx = sessions.get(input.threadId);
+                      if (!ctx || ctx.stopped) return;
+                      const task = grokSubagentTask(notification, ctx.acpSessionId);
+                      if (!task) return;
+                      yield* offerRuntimeEvent({
+                        ...task,
+                        ...(yield* makeEventStamp()),
+                        provider: PROVIDER,
+                        threadId: input.threadId,
+                        turnId: resolveSessionCallbackTurnId(sessions, input.threadId),
+                      });
+                    }),
+                  ),
+                ),
+              { discard: true },
+            );
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
                 Effect.gen(function* () {
@@ -2057,6 +2085,54 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         yield* Deferred.succeed(pending.resolution, { _tag: "answered", answers });
       });
 
+    const getAgentHistory: GrokAdapterShape["getAgentHistory"] = Effect.fn(
+      "GrokAdapter.getAgentHistory",
+    )(function* (input) {
+      const parentSessionId = parseGrokResume(input.resumeCursor)?.sessionId;
+      if (!parentSessionId || !input.cwd)
+        return {
+          status: "unavailable",
+          entries: [],
+          nextOffset: null,
+          message: "No saved Grok session is available for this thread.",
+        };
+      const cwd = input.cwd;
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const acp = yield* makeGrokAcpRuntime({
+            grokSettings,
+            ...(options?.environment ? { environment: options.environment } : {}),
+            childProcessSpawner,
+            cwd,
+            clientInfo: { name: "t3-code", version: "0.0.0" },
+          });
+          // Only negotiate the transport. Never create, load, or resume a session for history.
+          yield* acp.initialize();
+          return yield* readGrokAgentHistory({
+            parentSessionId,
+            agentId: input.agentId,
+            cwd,
+            offset: input.offset,
+            view: input.view,
+            request: acp.request,
+          });
+        }),
+      ).pipe(
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.timeout("20 seconds"),
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "_x.ai/session/updates",
+              detail:
+                "Could not read saved Grok agent history. This requires a Grok CLI with session history extensions.",
+              cause,
+            }),
+        ),
+      );
+    });
+
     const readThread: GrokAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
@@ -2117,6 +2193,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
       sendTurn,
       interruptTurn,
       readThread,
+      getAgentHistory,
       rollbackThread,
       respondToRequest,
       respondToUserInput,

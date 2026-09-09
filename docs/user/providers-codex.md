@@ -157,3 +157,13 @@ Use a totally separate `CODEX_HOME path` only when you want a separate Codex wor
 
 That means separate sessions and less account switching inside old threads. Most dual-account users
 should use the shared-home plus shadow-home setup instead.
+
+## Subagent history
+
+On web and desktop, open the Agents panel, expand a subagent, and choose
+**Open full activity** to read its saved conversation and tool activity. This
+also works after the session stops, provided Codex still has its saved history
+on the connected computer. Opening history does not resume the agent.
+
+Use **Refresh** for newly saved activity and **Next** for subsequent pages.
+Long entries are shortened and marked. Claude also supports this history view.
