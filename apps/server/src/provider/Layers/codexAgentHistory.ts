@@ -50,8 +50,8 @@ export function codexHistoryEntry(
     case "fileChange":
       return agentHistoryEntry(
         item.id,
-        "tool",
-        "File changes",
+        "file-edit",
+        `Edit ${item.changes.map((change) => change.path).join(", ")}`,
         item.changes.map((change) => `${change.path}\n${change.diff}`).join("\n\n"),
       );
     case "mcpToolCall":
