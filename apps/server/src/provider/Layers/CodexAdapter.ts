@@ -1,3 +1,4 @@
+import { makeAgentHistoryClient } from "./agentHistoryClient.ts";
 import { withCodexAppServerClient } from "./CodexProvider.ts";
 import { readCodexAgentHistory } from "./codexAgentHistory.ts";
 /**
@@ -2236,6 +2237,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
+  const withHistoryClient = yield* makeAgentHistoryClient((cwd) =>
+    withCodexAppServerClient({
+      binaryPath: codexConfig.binaryPath,
+      homePath: codexConfig.homePath,
+      launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
+      environment: options?.environment,
+      cwd,
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner)),
+  );
+
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -2572,6 +2583,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   });
 
+  /** Read saved descendants through the shared read-only transport without resuming a coding session. */
   const getAgentHistory: CodexAdapterShape["getAgentHistory"] = Effect.fn("getAgentHistory")(
     function* (input) {
       if (!isCodexResumeCursorSchema(input.resumeCursor)) {
@@ -2583,27 +2595,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         };
       }
       const parentThreadId = input.resumeCursor.threadId;
-      return yield* Effect.scoped(
-        Effect.gen(function* () {
-          const { client } = yield* withCodexAppServerClient({
-            binaryPath: codexConfig.binaryPath,
-            homePath: codexConfig.homePath,
-            launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
-            environment: options?.environment,
-            cwd: input.cwd ?? process.cwd(),
-          });
-          return yield* readCodexAgentHistory({
-            parentThreadId,
-            agentId: input.agentId,
-            offset: input.offset,
-            view: input.view,
-            readThread: (threadId, includeTurns) =>
-              client.request("thread/read", { threadId, includeTurns }),
-          });
+      return yield* withHistoryClient(input.cwd ?? process.cwd(), ({ client }) =>
+        readCodexAgentHistory({
+          parentThreadId,
+          agentId: input.agentId,
+          offset: input.offset,
+          view: input.view,
+          readThread: (threadId, includeTurns) =>
+            client.request("thread/read", { threadId, includeTurns }),
         }),
       ).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-        Effect.timeout("20 seconds"),
         Effect.mapError(
           (cause) =>
             new ProviderAdapterRequestError({

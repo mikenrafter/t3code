@@ -1,3 +1,4 @@
+import { makeAgentHistoryClient } from "./agentHistoryClient.ts";
 import {
   EventId,
   type OpenCodeSettings,
@@ -972,6 +973,24 @@ export function makeOpenCodeAdapter(
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    const withHistoryClient = yield* makeAgentHistoryClient(
+      Effect.fn("OpenCode.historyClient")(function* (directory: string) {
+        const server = yield* openCodeRuntime.connectToOpenCodeServer({
+          binaryPath: openCodeSettings.binaryPath,
+          directory,
+          serverUrl: openCodeSettings.serverUrl,
+          ...(openCodeSettings.serverPassword
+            ? { serverPassword: openCodeSettings.serverPassword }
+            : {}),
+          ...(options?.environment ? { environment: options.environment } : {}),
+        });
+        return openCodeRuntime.createOpenCodeSdkClient({
+          baseUrl: server.url,
+          directory,
+          ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
+        });
+      }),
+    );
     const deleteContextIfCurrent = (context: OpenCodeSessionContext) => {
       if (sessions.get(context.session.threadId) === context) {
         sessions.delete(context.session.threadId);
@@ -3885,6 +3904,7 @@ export function makeOpenCodeAdapter(
     const hasSession: OpenCodeAdapterShape["hasSession"] = (threadId) =>
       Effect.sync(() => sessions.has(threadId));
 
+    /** Use the live parent client when available, otherwise share a directory-scoped history connection. */
     const getAgentHistory: OpenCodeAdapterShape["getAgentHistory"] = Effect.fn("getAgentHistory")(
       function* (input) {
         const parentSessionId = parseOpenCodeResume(input.resumeCursor)?.sessionId;
@@ -3911,29 +3931,11 @@ export function makeOpenCodeAdapter(
               ).pipe(Effect.map((response) => response.data ?? [])),
           });
         const context = sessions.get(input.threadId);
-        return yield* Effect.scoped(
-          Effect.gen(function* () {
-            if (context?.openCodeSessionId === parentSessionId) return yield* read(context.client);
-            const directory = input.cwd ?? serverConfig.cwd;
-            const server = yield* openCodeRuntime.connectToOpenCodeServer({
-              binaryPath: openCodeSettings.binaryPath,
-              directory,
-              serverUrl: openCodeSettings.serverUrl,
-              ...(openCodeSettings.serverPassword
-                ? { serverPassword: openCodeSettings.serverPassword }
-                : {}),
-              ...(options?.environment ? { environment: options.environment } : {}),
-            });
-            return yield* read(
-              openCodeRuntime.createOpenCodeSdkClient({
-                baseUrl: server.url,
-                directory,
-                ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
-              }),
-            );
-          }),
+        return yield* (
+          context?.openCodeSessionId === parentSessionId
+            ? read(context.client).pipe(Effect.timeout("20 seconds"))
+            : withHistoryClient(input.cwd ?? serverConfig.cwd, read)
         ).pipe(
-          Effect.timeout("20 seconds"),
           Effect.mapError(
             (cause) =>
               new ProviderAdapterRequestError({

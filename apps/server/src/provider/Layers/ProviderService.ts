@@ -2132,6 +2132,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  /** Route history to the persisted provider instance without recovering or starting its session. */
   const getAgentHistory: ProviderServiceMethod<"getAgentHistory"> = Effect.fn("getAgentHistory")(
     function* (input) {
       const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));

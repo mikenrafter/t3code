@@ -1,3 +1,4 @@
+import { makeAgentHistoryClient } from "./agentHistoryClient.ts";
 import {
   ApprovalRequestId,
   type GrokSettings,
@@ -367,6 +368,20 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     };
 
     const sessions = new Map<ThreadId, GrokSessionContext>();
+    const withHistoryClient = yield* makeAgentHistoryClient(
+      Effect.fn("Grok.historyClient")(function* (cwd: string) {
+        const acp = yield* makeGrokAcpRuntime({
+          grokSettings,
+          ...(options?.environment ? { environment: options.environment } : {}),
+          childProcessSpawner,
+          cwd,
+          clientInfo: { name: "t3-code", version: "0.0.0" },
+        });
+        // History needs transport negotiation, never a loaded or resumed coding session.
+        yield* acp.initialize();
+        return acp;
+      }),
+    );
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
     const requestedTurnInactivityTimeoutMs = options?.turnInactivityTimeoutMs;
@@ -2100,6 +2115,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         yield* Deferred.succeed(pending.resolution, { _tag: "answered", answers });
       });
 
+    /** Read verified child history over a shared initialized transport without loading a session. */
     const getAgentHistory: GrokAdapterShape["getAgentHistory"] = Effect.fn(
       "GrokAdapter.getAgentHistory",
     )(function* (input) {
@@ -2112,36 +2128,25 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           message: "No saved Grok session is available for this thread.",
         };
       const cwd = input.cwd;
-      return yield* Effect.scoped(
-        Effect.gen(function* () {
-          const acp = yield* makeGrokAcpRuntime({
-            grokSettings,
-            ...(options?.environment ? { environment: options.environment } : {}),
-            childProcessSpawner,
-            cwd,
-            clientInfo: { name: "t3-code", version: "0.0.0" },
-          });
-          // Only negotiate the transport. Never create, load, or resume a session for history.
-          yield* acp.initialize();
-          return yield* readGrokAgentHistory({
-            parentSessionId,
-            agentId: input.agentId,
-            cwd,
-            offset: input.offset,
-            view: input.view,
-            request: acp.request,
-          });
+      return yield* withHistoryClient(cwd, (acp) =>
+        readGrokAgentHistory({
+          parentSessionId,
+          agentId: input.agentId,
+          cwd,
+          offset: input.offset,
+          view: input.view,
+          request: acp.request,
         }),
       ).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
-        Effect.timeout("20 seconds"),
         Effect.mapError(
           (cause) =>
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "_x.ai/session/updates",
               detail:
-                "Could not read saved Grok agent history. This requires a Grok CLI with session history extensions.",
+                cause._tag === "TimeoutError"
+                  ? "Reading saved Grok agent history timed out after 20 seconds."
+                  : "Could not read saved Grok agent history. This requires a Grok CLI with session history extensions.",
               cause,
             }),
         ),

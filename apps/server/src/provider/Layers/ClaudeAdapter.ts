@@ -5031,6 +5031,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  /** Read the configured instance’s saved child transcript without creating a live SDK query. */
   const getAgentHistory: ClaudeAdapterShape["getAgentHistory"] = Effect.fn("getAgentHistory")(
     function* (input) {
       const sessionId = readClaudeResumeState(input.resumeCursor)?.resume;

@@ -68,6 +68,7 @@ type MessageEntry = {
 const runtimeMock = {
   state: {
     startCalls: [] as string[],
+    historyConnectCalls: [] as string[],
     sessionCreateUrls: [] as string[],
     sessionCreateInputs: [] as Array<Record<string, unknown>>,
     createdSessionIds: [] as string[],
@@ -132,6 +133,7 @@ const runtimeMock = {
   },
   reset() {
     this.state.startCalls.length = 0;
+    this.state.historyConnectCalls.length = 0;
     this.state.sessionCreateUrls.length = 0;
     this.state.sessionCreateInputs.length = 0;
     this.state.createdSessionIds.length = 0;
@@ -211,6 +213,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
   connectToOpenCodeServer: ({ serverUrl, serverPassword }) =>
     Effect.gen(function* () {
       const url = serverUrl ?? "http://127.0.0.1:4301";
+      runtimeMock.state.historyConnectCalls.push(url);
       // Always register a finalizer so the closeCalls/closeError probes fire;
       // production attaches none for external servers.
       yield* Effect.addFinalizer(() =>
@@ -785,21 +788,26 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           ],
         },
       ];
-      const result = yield* adapter.getAgentHistory!({
+      const input = {
         threadId: asThreadId("stopped"),
         agentId: "ses_child",
         offset: 0,
         resumeCursor: { schemaVersion: 1, sessionId: "ses_parent" },
         cwd: "/saved/workspace",
-      });
+      };
+      const result = yield* adapter.getAgentHistory!(input);
+      yield* adapter.getAgentHistory!(input);
       NodeAssert.equal(result.status, "ready");
       NodeAssert.equal(result.entries[0]?.detail, "Saved answer");
-      NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_child"]);
+      NodeAssert.deepEqual(runtimeMock.state.sessionGetIds, ["ses_child", "ses_child"]);
       NodeAssert.deepEqual(runtimeMock.state.sessionCreateInputs, []);
       NodeAssert.deepEqual(runtimeMock.state.sessionUpdateCalls, []);
       NodeAssert.deepEqual(runtimeMock.state.abortCalls, []);
       NodeAssert.deepEqual(runtimeMock.state.promptCalls, []);
       NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+      NodeAssert.deepEqual(runtimeMock.state.closeCalls, []);
+      NodeAssert.deepEqual(runtimeMock.state.historyConnectCalls, ["http://127.0.0.1:9999"]);
+      yield* TestClock.adjust("31 seconds");
       NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
     }),
   );
