@@ -20,13 +20,17 @@ export function codexHistoryEntry(
       );
     case "agentMessage":
       return agentHistoryEntry(item.id, "assistant", "Agent", item.text);
-    case "reasoning":
+    case "reasoning": {
+      const summary = (item.summary ?? []).join("\n").trim();
+      const content = (item.content ?? []).join("\n").trim();
+      if (!summary && !content) return null;
       return agentHistoryEntry(
         item.id,
         "reasoning",
-        "Reasoning summary",
-        (item.summary ?? []).join("\n"),
+        summary ? "Reasoning summary" : "Reasoning",
+        summary || content,
       );
+    }
     case "plan":
       return agentHistoryEntry(item.id, "assistant", "Plan", item.text);
     case "commandExecution":
