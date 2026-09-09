@@ -108,3 +108,39 @@ it.effect("honors native revert boundaries and maps text, reasoning and failed t
     expect(result.entries[2]?.detail).toContain('"error": "failed"');
   }),
 );
+
+it.effect("labels edits by file path", () =>
+  Effect.gen(function* () {
+    const result = yield* readOpenCodeAgentHistory({
+      parentSessionId: "parent",
+      agentId: "child",
+      offset: 0,
+      readSession: (id) => Effect.succeed({ id, parentID: "parent" }),
+      readMessages: () =>
+        Effect.succeed([
+          {
+            info: { id: "message", role: "assistant" as const },
+            parts: [
+              {
+                type: "tool" as const,
+                id: "edit",
+                callID: "edit",
+                sessionID: "child",
+                messageID: "message",
+                tool: "edit",
+                state: {
+                  status: "completed" as const,
+                  input: { filePath: "src/X.jsx", newString: "new" },
+                  output: "patched",
+                  title: "edit",
+                  metadata: {},
+                  time: { start: 1, end: 2 },
+                },
+              },
+            ],
+          },
+        ]),
+    });
+    expect(result.entries[0]).toMatchObject({ kind: "file-edit", title: "Edit src/X.jsx" });
+  }),
+);

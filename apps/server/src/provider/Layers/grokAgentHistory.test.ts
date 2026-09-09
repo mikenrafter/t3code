@@ -7,6 +7,21 @@ const envelope = (update: Record<string, unknown>, sessionId = "child") => ({
   params: { sessionId, update },
 });
 describe("Grok saved child history", () => {
+  it("retains edit classification through result-only updates", () => {
+    const entries = grokHistoryEntries(
+      [
+        envelope({
+          sessionUpdate: "tool_call",
+          toolCallId: "edit",
+          kind: "edit",
+          title: "Edit X.jsx",
+        }),
+        envelope({ sessionUpdate: "tool_call_update", toolCallId: "edit", rawOutput: "patch" }),
+      ],
+      "child",
+    );
+    expect(entries[0]).toMatchObject({ kind: "file-edit", title: "Edit X.jsx" });
+  });
   it("folds chunks and tool results, excluding unrelated sessions", () => {
     const entries = grokHistoryEntries(
       [

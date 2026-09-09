@@ -9,11 +9,13 @@ function historyEntry(role: Message["role"], part: Part): AgentHistoryEntry | nu
       return agentHistoryEntry(part.id, role, role === "user" ? "Prompt" : "Agent", part.text);
     case "reasoning":
       return agentHistoryEntry(part.id, "reasoning", "Reasoning", part.text);
-    case "tool":
+    case "tool": {
+      const fileEdit = part.tool === "edit" || part.tool === "write" || part.tool === "apply_patch";
+      const path = part.state.input.filePath ?? part.state.input.file_path;
       return agentHistoryEntry(
         part.id,
-        "tool",
-        part.tool,
+        fileEdit ? "file-edit" : "tool",
+        fileEdit && typeof path === "string" ? `Edit ${path}` : part.tool,
         JSON.stringify(
           {
             input: part.state.input,
@@ -25,6 +27,7 @@ function historyEntry(role: Message["role"], part: Part): AgentHistoryEntry | nu
           2,
         ),
       );
+    }
     default:
       return null;
   }

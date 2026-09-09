@@ -123,15 +123,25 @@ export function claudeHistoryEntries(message: SessionMessage): AgentHistoryEntry
         return block.thinking
           ? [agentHistoryEntry(id, "reasoning", "Reasoning", block.thinking)]
           : [];
-      case "tool_use":
+      case "tool_use": {
+        const fileEdit =
+          block.name === "Edit" || block.name === "Write" || block.name === "MultiEdit";
+        const path =
+          block.input &&
+          typeof block.input === "object" &&
+          "file_path" in block.input &&
+          typeof block.input.file_path === "string"
+            ? block.input.file_path
+            : null;
         return [
           agentHistoryEntry(
             id,
-            "tool",
-            block.name ?? "Tool",
+            fileEdit ? "file-edit" : "tool",
+            fileEdit && path ? `Edit ${path}` : (block.name ?? "Tool"),
             JSON.stringify(block.input ?? {}, null, 2),
           ),
         ];
+      }
       case "tool_result":
         return [
           agentHistoryEntry(

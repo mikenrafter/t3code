@@ -36,7 +36,7 @@ export function collectAgentHistory(
         return false;
       }
       if (input.view === "recent-tools") {
-        if (entry.kind !== "tool") return false;
+        if (entry.kind !== "tool" && entry.kind !== "file-edit") return false;
         entries.push({
           ...entry,
           detail: entry.detail.slice(0, 240),

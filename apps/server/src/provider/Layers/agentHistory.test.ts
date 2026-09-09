@@ -2,6 +2,11 @@ import { describe, it, expect } from "@effect/vitest";
 import { agentHistoryEntry, collectAgentHistory } from "./agentHistory.ts";
 
 describe("agent history selection", () => {
+  it("keeps file edits in recent tools", () => {
+    const page = collectAgentHistory({ offset: 0, view: "recent-tools" });
+    page.add(agentHistoryEntry("edit", "file-edit", "Edit X.jsx", "patch"));
+    expect(page.result().entries.map((entry) => entry.id)).toEqual(["edit"]);
+  });
   const entries = Array.from({ length: 130 }, (_, index) =>
     agentHistoryEntry(
       String(index),

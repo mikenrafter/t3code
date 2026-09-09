@@ -57,6 +57,22 @@ const read = (agentId = "child", offset = 0) =>
   readClaudeAgentHistory({ configDir, sessionId, agentId, offset });
 
 describe("Claude saved agent history", () => {
+  it("identifies file edits without putting patch content in the title", async () => {
+    await save("child", [
+      "prompt",
+      [
+        {
+          type: "tool_use",
+          id: "edit",
+          name: "Edit",
+          input: { file_path: "src/X.jsx", old_string: "old", new_string: "new" },
+        },
+      ],
+    ]);
+    const result = await read();
+    expect(result.entries[1]).toMatchObject({ kind: "file-edit", title: "Edit src/X.jsx" });
+    expect(result.entries[1]?.detail).toContain("new_string");
+  });
   it("reads nested transcripts, preserves calls and results, and bounds entry detail", async () => {
     await save(
       "child",

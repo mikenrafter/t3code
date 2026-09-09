@@ -45,6 +45,22 @@ function thread(id: string, parent: string | null, count = 1): V2ThreadReadRespo
 }
 
 describe("saved Codex agent history", () => {
+  it("labels file edits with their paths while preserving the patch for expansion", () => {
+    expect(
+      codexHistoryEntry({
+        type: "fileChange",
+        id: "edit",
+        status: "completed",
+        changes: [
+          { path: "src/X.jsx", kind: { type: "update", movePath: null }, diff: "-old\n+new" },
+        ],
+      }),
+    ).toMatchObject({
+      kind: "file-edit",
+      title: "Edit src/X.jsx",
+      detail: "src/X.jsx\n-old\n+new",
+    });
+  });
   it("uses native reasoning text when no summary is supplied and omits empty markers", () => {
     expect(
       codexHistoryEntry({
