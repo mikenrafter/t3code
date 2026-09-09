@@ -1726,7 +1726,7 @@ export type OrchestrationGetAgentHistoryInput = typeof OrchestrationGetAgentHist
 
 export const AgentHistoryEntry = Schema.Struct({
   id: Schema.String,
-  kind: Schema.Literals(["tool", "assistant", "user", "reasoning"]),
+  kind: Schema.Literals(["tool", "file-edit", "assistant", "user", "reasoning"]),
   title: Schema.String.check(Schema.isMaxLength(500)),
   detail: Schema.String.check(Schema.isMaxLength(8000)),
   truncated: Schema.Boolean,

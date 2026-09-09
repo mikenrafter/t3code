@@ -148,7 +148,7 @@ export function grokHistoryEntries(
           : (previous?.detail ?? ""));
     const normalized = agentHistoryEntry(
       `${childId}:tool:${id}`,
-      "tool",
+      update.kind === "edit" || previous?.kind === "file-edit" ? "file-edit" : "tool",
       text(update.title) || previous?.title || "Tool",
       detail,
     );
