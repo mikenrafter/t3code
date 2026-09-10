@@ -818,6 +818,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       if (guard === null || guard.phase !== "paused" || guard.scheduledAt !== command.scheduledAt) {
         return [];
       }
+      // A turn the user started while the thread was paused is an explicit
+      // resume: the scheduled continuation would inject a surprise message
+      // into a conversation the user is already driving.
+      if (thread.session?.status === "running" || thread.session?.status === "starting") {
+        return [];
+      }
       const occurredAt = command.createdAt;
       const waitedMs = Math.max(0, Date.parse(occurredAt) - Date.parse(guard.scheduledAt));
       const resumeMessageId = MessageId.make(`usage-guard-resume:${command.commandId}`);

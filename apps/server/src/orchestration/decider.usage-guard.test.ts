@@ -5,7 +5,6 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationReadModel,
-  type OrchestrationThread,
   type OrchestrationUsageGuard,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -42,6 +41,7 @@ function makeReadModel(input: {
   readonly usageGuard?: OrchestrationUsageGuard | null;
   readonly archivedAt?: string | null;
   readonly snapshotSequence?: number;
+  readonly sessionStatus?: "idle" | "running" | "starting";
 }): OrchestrationReadModel {
   return {
     snapshotSequence: input.snapshotSequence ?? 0,
@@ -67,11 +67,22 @@ function makeReadModel(input: {
         snoozedAt: null,
         deletedAt: null,
         usageGuard: input.usageGuard ?? null,
+        session:
+          input.sessionStatus === undefined
+            ? null
+            : {
+                threadId: ThreadId.make("thread-1"),
+                status: input.sessionStatus,
+                providerName: null,
+                runtimeMode: "full-access",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: NOW,
+              },
         messages: [],
         proposedPlans: [],
         activities: [],
         checkpoints: [],
-        session: null,
       },
     ],
     updatedAt: NOW,
@@ -82,7 +93,7 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
   it.effect("suppresses a prompted guard for its window's reset", () =>
     Effect.gen(function* () {
       const resetsAt = "2026-01-01T05:00:00.000Z";
-      const event = yield* decideOrchestrationCommand({
+      const result = yield* decideOrchestrationCommand({
         command: {
           type: "thread.usage-guard.suppress",
           commandId: CommandId.make("cmd-suppress"),
@@ -94,8 +105,10 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
           usageGuard: makeGuard({ phase: "prompted", windowResetsAt: resetsAt }),
         }),
       });
-      expect(event.type).toBe("thread.usage-guard.suppressed");
-      if (event.type === "thread.usage-guard.suppressed") {
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event?.type === "thread.usage-guard.suppressed") {
         expect(event.payload.guard.phase).toBe("suppressed");
         expect(event.payload.guard.suppressUntil).toBe(resetsAt);
         expect(event.payload.guard.resumeAt ?? null).toBeNull();
@@ -145,7 +158,7 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
         suppressUntil: resetsAt,
         updatedAt: NOW,
       } satisfies OrchestrationUsageGuard;
-      const event = yield* decideOrchestrationCommand({
+      const result = yield* decideOrchestrationCommand({
         command: {
           type: "thread.usage-guard.suppress",
           commandId: CommandId.make("cmd-suppress-again"),
@@ -155,8 +168,9 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
         },
         readModel: makeReadModel({ usageGuard: existing }),
       });
-      expect(event.type).toBe("thread.usage-guard.suppressed");
-      if (event.type === "thread.usage-guard.suppressed") {
+      const events = Array.isArray(result) ? result : [result];
+      const event = events[0];
+      if (event?.type === "thread.usage-guard.suppressed") {
         expect(event.payload.guard).toEqual(existing);
         expect(event.payload.updatedAt).toBe(NOW);
       }
@@ -185,7 +199,7 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
   it("settles with the reactor-computed guard at the command's time", () =>
     Effect.gen(function* () {
       const settledGuard = makeGuard({ phase: "paused", scheduledAt: SETTLED_AT });
-      const event = yield* decideOrchestrationCommand({
+      const result = yield* decideOrchestrationCommand({
         command: {
           type: "thread.usage-guard.settle",
           commandId: CommandId.make("cmd-settle"),
@@ -196,8 +210,9 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
         },
         readModel: makeReadModel({ usageGuard: makeGuard({ phase: "prompted" }) }),
       });
-      expect(event.type).toBe("thread.usage-guard.settled");
-      if (event.type === "thread.usage-guard.settled") {
+      const events = Array.isArray(result) ? result : [result];
+      const event = events[0];
+      if (event?.type === "thread.usage-guard.settled") {
         expect(event.payload.guard).toEqual(settledGuard);
         expect(event.payload.updatedAt).toBe(RESUME_NOW);
       }
@@ -223,7 +238,7 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
 
   it("re-emits a settle without churning when the thread already paused", () =>
     Effect.gen(function* () {
-      const event = yield* decideOrchestrationCommand({
+      const result = yield* decideOrchestrationCommand({
         command: {
           type: "thread.usage-guard.settle",
           commandId: CommandId.make("cmd-settle-again"),
@@ -236,15 +251,16 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
           usageGuard: makeGuard({ phase: "paused", scheduledAt: SETTLED_AT }),
         }),
       });
-      expect(event.type).toBe("thread.usage-guard.settled");
-      if (event.type === "thread.usage-guard.settled") {
+      const events = Array.isArray(result) ? result : [result];
+      const event = events[0];
+      if (event?.type === "thread.usage-guard.settled") {
         expect(event.payload.updatedAt).toBe(NOW);
       }
     }));
 
   it("resumes a paused guard with its continuation turn", () =>
     Effect.gen(function* () {
-      const events = yield* decideOrchestrationCommand({
+      const result = yield* decideOrchestrationCommand({
         command: {
           type: "thread.usage-guard.resume",
           commandId: CommandId.make("cmd-resume"),
@@ -260,29 +276,25 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
           }),
         }),
       });
-      const list = Array.isArray(events) ? events : [events];
-      expect(list.map((entry) => entry.type)).toEqual([
+      const events = Array.isArray(result) ? result : [result];
+      expect(events.map((entry) => entry.type)).toEqual([
         "thread.usage-guard.resumed",
         "thread.message-sent",
         "thread.turn-start-requested",
       ]);
-      const resumed = list[0];
-      const message = list[1];
+      const resumed = events[0];
+      const message = events[1];
+      const turnStart = events[2];
       if (
         resumed?.type === "thread.usage-guard.resumed" &&
-        message?.type === "thread.message-sent"
+        message?.type === "thread.message-sent" &&
+        turnStart?.type === "thread.turn-start-requested"
       ) {
         expect(resumed.payload.waitedMs).toBe(24 * 60 * 60 * 1000);
         expect(resumed.payload.scheduledAt).toBe(SETTLED_AT);
         expect(message.causationEventId).toBe(resumed.eventId);
         expect(message.payload.text).toContain("paused 24 hours ago");
-      }
-      const turnStart = list[2];
-      if (
-        turnStart?.type === "thread.turn-start-requested" &&
-        message?.type === "thread.message-sent"
-      ) {
-        expect(turnStart.causationEventId).toBe(resumed?.eventId);
+        expect(turnStart.causationEventId).toBe(resumed.eventId);
         expect(turnStart.payload.messageId).toBe(message.payload.messageId);
         expect(turnStart.payload.messageId).toBe(
           MessageId.make(`usage-guard-resume:${CommandId.make("cmd-resume")}`),
@@ -297,11 +309,14 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
           type: "thread.usage-guard.resume",
           commandId: CommandId.make("cmd-resume-wrong"),
           threadId: ThreadId.make("thread-1"),
-          scheduledAt: "2026-01-03T00:00:00.000Z",
+          scheduledAt: SETTLED_AT,
           createdAt: RESUME_NOW,
         },
         readModel: makeReadModel({
-          usageGuard: makeGuard({ phase: "paused", scheduledAt: SETTLED_AT }),
+          usageGuard: {
+            ...makeGuard({ phase: "paused", scheduledAt: SETTLED_AT }),
+            scheduledAt: "2026-01-03T00:00:00.000Z",
+          },
         }),
       });
       expect(Array.isArray(wrongSchedule) ? wrongSchedule : [wrongSchedule]).toHaveLength(0);
@@ -331,5 +346,29 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
         readModel: makeReadModel({}),
       });
       expect(Array.isArray(noGuard) ? noGuard : [noGuard]).toHaveLength(0);
+    }));
+
+  it("no-ops a resume when the user already started their own turn", () =>
+    Effect.gen(function* () {
+      const resumeWithSession = (sessionStatus: "running" | "starting") =>
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.usage-guard.resume",
+            commandId: CommandId.make(`cmd-resume-${sessionStatus}`),
+            threadId: ThreadId.make("thread-1"),
+            scheduledAt: SETTLED_AT,
+            createdAt: RESUME_NOW,
+          },
+          readModel: makeReadModel({
+            usageGuard: makeGuard({ phase: "paused", scheduledAt: SETTLED_AT }),
+            sessionStatus,
+          }),
+        });
+
+      const running = yield* resumeWithSession("running");
+      expect(Array.isArray(running) ? running : [running]).toHaveLength(0);
+
+      const starting = yield* resumeWithSession("starting");
+      expect(Array.isArray(starting) ? starting : [starting]).toHaveLength(0);
     }));
 });

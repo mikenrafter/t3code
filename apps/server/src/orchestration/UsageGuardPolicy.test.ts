@@ -1,5 +1,6 @@
 import type { OrchestrationUsageGuard, ServerProviderUsageWindow } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 
 import {
   USAGE_GUARD_MAX_RESUME_MS,
@@ -194,7 +195,7 @@ describe("resolveGuardResumeAt", () => {
   });
 
   it("caps the resume at five hours out", () => {
-    const cap = new Date(NOW_MS + USAGE_GUARD_MAX_RESUME_MS).toISOString();
+    const cap = DateTime.formatIso(DateTime.makeUnsafe(NOW_MS + USAGE_GUARD_MAX_RESUME_MS));
     expect(
       resolveGuardResumeAt({
         window: { kind: "session", resetsAt: "2026-09-10T23:00:00.000Z" },
@@ -204,7 +205,7 @@ describe("resolveGuardResumeAt", () => {
   });
 
   it("falls back to the five-hour cap without a reset time", () => {
-    const cap = new Date(NOW_MS + USAGE_GUARD_MAX_RESUME_MS).toISOString();
+    const cap = DateTime.formatIso(DateTime.makeUnsafe(NOW_MS + USAGE_GUARD_MAX_RESUME_MS));
     expect(resolveGuardResumeAt({ window: { kind: "session" }, nowMs: NOW_MS })).toBe(cap);
   });
 

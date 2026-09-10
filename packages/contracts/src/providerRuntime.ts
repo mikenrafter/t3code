@@ -334,6 +334,14 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
   autoCompactThreshold: Schema.optional(PositiveInt),
+  /**
+   * The count is derived, not reported: providers whose streams carry no
+   * token accounting (Cursor, Grok, OpenCode, Antigravity) get a chars/4
+   * estimate anchored on the last compaction's reported context. Clients
+   * label estimated values (a "~" prefix) instead of presenting them as
+   * provider numbers.
+   */
+  estimated: Schema.optional(Schema.Boolean),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 
