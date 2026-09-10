@@ -9,6 +9,7 @@
 import {
   RuntimeMode,
   IsoDateTime,
+  OrchestrationSessionErrorClass,
   OrchestrationSessionStatus,
   OrchestrationSessionStatusDetail,
   ProviderInstanceId,
@@ -31,6 +32,7 @@ export const ProjectionThreadSession = Schema.Struct({
   runtimeMode: RuntimeMode,
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(Schema.String),
+  lastErrorClass: Schema.NullOr(OrchestrationSessionErrorClass),
   updatedAt: IsoDateTime,
 });
 export type ProjectionThreadSession = typeof ProjectionThreadSession.Type;
