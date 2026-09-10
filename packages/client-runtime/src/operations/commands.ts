@@ -56,6 +56,9 @@ export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.resp
 export type DismissThreadUserInputInput = CommandInput<"thread.user-input.dismiss">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
 export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
+export type UsageGuardSuppressInput = CommandInput<"thread.usage-guard.suppress">;
+export type UsageGuardCompactInput = CommandInput<"thread.usage-guard.compact">;
+export type UsageGuardResumeInput = CommandInput<"thread.usage-guard.resume">;
 
 type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
 type GenerateHandoverTag = typeof ORCHESTRATION_WS_METHODS.generateHandover;
@@ -210,6 +213,42 @@ export const unsnoozeThread: (input: UnsnoozeThreadInput) => CommandEffect = Eff
     ...input,
     type: "thread.unsnooze",
     commandId: yield* commandId(input),
+  });
+});
+
+export const usageGuardSuppress: (input: UsageGuardSuppressInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.usageGuardSuppress",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.usage-guard.suppress",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const usageGuardCompact: (input: UsageGuardCompactInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.usageGuardCompact",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.usage-guard.compact",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const usageGuardResume: (input: UsageGuardResumeInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.usageGuardResume",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.usage-guard.resume",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
   });
 });
 

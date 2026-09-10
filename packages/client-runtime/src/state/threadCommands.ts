@@ -32,6 +32,9 @@ import {
   type UnsettleThreadInput,
   type UnsnoozeThreadInput,
   type UpdateThreadMetadataInput,
+  type UsageGuardCompactInput,
+  type UsageGuardResumeInput,
+  type UsageGuardSuppressInput,
   archiveThread,
   createThread,
   deleteThread,
@@ -57,6 +60,9 @@ import {
   unsettleThread,
   unsnoozeThread,
   updateThreadMetadata,
+  usageGuardCompact,
+  usageGuardResume,
+  usageGuardSuppress,
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 
@@ -85,6 +91,9 @@ export type {
   UnsettleThreadInput,
   UnsnoozeThreadInput,
   UpdateThreadMetadataInput,
+  UsageGuardCompactInput,
+  UsageGuardResumeInput,
+  UsageGuardSuppressInput,
 } from "../operations/commands.ts";
 
 export function createThreadEnvironmentAtoms<R, E>(
@@ -149,6 +158,24 @@ export function createThreadEnvironmentAtoms<R, E>(
     unsnooze: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unsnooze",
       execute: (input: UnsnoozeThreadInput) => unsnoozeThread(input),
+      scheduler,
+      concurrency,
+    }),
+    usageGuardSuppress: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:usage-guard-suppress",
+      execute: (input: UsageGuardSuppressInput) => usageGuardSuppress(input),
+      scheduler,
+      concurrency,
+    }),
+    usageGuardCompact: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:usage-guard-compact",
+      execute: (input: UsageGuardCompactInput) => usageGuardCompact(input),
+      scheduler,
+      concurrency,
+    }),
+    usageGuardResume: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:usage-guard-resume",
+      execute: (input: UsageGuardResumeInput) => usageGuardResume(input),
       scheduler,
       concurrency,
     }),

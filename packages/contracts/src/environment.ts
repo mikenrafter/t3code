@@ -102,6 +102,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands thread.snooze / thread.unsnooze commands. Same
       version-skew contract as threadSettlement. */
   threadSnooze: Schema.optionalKey(Schema.Boolean),
+  /** Server persists the usage-window guard's prompt/pause records and
+      understands thread.usage-guard.* commands. Same version-skew contract
+      as threadSettlement. */
+  threadUsageGuard: Schema.optionalKey(Schema.Boolean),
   /** Server streams themes an environment publishes. Absent on servers from
       before environment themes shipped, which never emit the events -- so a
       client reconnecting to one must drop published themes rather than keep
@@ -131,7 +135,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       version-skew contract as threadSettlement. */
   threadPullRequests: Schema.optionalKey(Schema.Boolean),
   pullRequestStackActions: Schema.optionalKey(Schema.Boolean),
- /** Server can generate a compact continuation handover without starting a provider turn. */
+  /** Server can generate a compact continuation handover without starting a provider turn. */
   threadHandoverGeneration: Schema.optionalKey(Schema.Boolean),
   /** The update path clients should offer for this server. Absent on
       servers that must be relaunched manually (dev checkouts, Windows

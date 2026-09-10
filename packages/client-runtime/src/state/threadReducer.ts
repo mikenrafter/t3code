@@ -134,6 +134,7 @@ export function applyThreadDetailEvent(
           snoozedUntil: null,
           snoozedAt: null,
           deletedAt: null,
+          usageGuard: null,
           pullRequests: [],
           messages: [],
           proposedPlans: [],
@@ -211,6 +212,27 @@ export function applyThreadDetailEvent(
           ...thread,
           snoozedUntil: null,
           snoozedAt: null,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.usage-guard.settled":
+    case "thread.usage-guard.suppressed":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          usageGuard: event.payload.guard,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.usage-guard.resumed":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          usageGuard: null,
           updatedAt: event.payload.updatedAt,
         },
       };

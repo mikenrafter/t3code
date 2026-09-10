@@ -1441,6 +1441,9 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadSessionStopCommand,
   ThreadUsageGuardSuppressCommand,
   ThreadUsageGuardCompactCommand,
+  // A paused thread's manual resume: the decider no-ops unless the schedule
+  // still matches, so a stale press cannot surprise a running thread.
+  ThreadUsageGuardResumeCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -1475,6 +1478,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadSessionStopCommand,
   ThreadUsageGuardSuppressCommand,
   ThreadUsageGuardCompactCommand,
+  ThreadUsageGuardResumeCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 

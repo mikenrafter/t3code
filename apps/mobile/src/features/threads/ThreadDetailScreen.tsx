@@ -81,6 +81,7 @@ import type {
 } from "../../lib/threadActivity";
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { ComposerFeedback } from "./ComposerFeedback";
+import { ComposerUsageGuard } from "./ComposerUsageGuard";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { ThreadCreationFailedCard } from "./ThreadCreationFailedCard";
@@ -179,6 +180,10 @@ export interface ThreadDetailScreenProps {
   ) => void;
   readonly onSubmitUserInput: () => Promise<unknown>;
   readonly onDismissUserInput: () => Promise<unknown>;
+  /** Usage guard answers; undefined when the server predates the guard. */
+  readonly onUsageGuardCompact?: () => Promise<void> | void;
+  readonly onUsageGuardKeepGoing?: () => Promise<void> | void;
+  readonly onUsageGuardResume?: () => Promise<void> | void;
   readonly showContent?: boolean;
 }
 
@@ -465,6 +470,24 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       ),
     [selectedThreadKey, usageLimitsKey],
   );
+  // The usage guard's persisted prompt/pause (server-side state; see the
+  // server's UsageGuardReactor). The "wait" answer is a local dismissal keyed
+  // per window period, so the next window's prompt still shows.
+  const activeUsageGuard = props.selectedThread.usageGuard ?? null;
+  const [dismissedUsageGuardPrompts, setDismissedUsageGuardPrompts] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const usageGuardPromptKey =
+    activeUsageGuard?.phase === "prompted"
+      ? `${props.selectedThread.id}:${activeUsageGuard.windowId}:${activeUsageGuard.windowResetsAt ?? ""}`
+      : null;
+  const visibleUsageGuard =
+    activeUsageGuard !== null &&
+    props.onUsageGuardCompact !== undefined &&
+    (activeUsageGuard.phase === "paused" ||
+      (usageGuardPromptKey !== null && !dismissedUsageGuardPrompts.has(usageGuardPromptKey)))
+      ? activeUsageGuard
+      : null;
   const dismissUsageLimits = useCallback(() => setUsageLimitsPanel(null), []);
   // A send may resolve after navigating away, so only the originating
   // thread's panel is cleared; a panel opened elsewhere in the meantime stays.
@@ -950,6 +973,26 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       report={usageLimitsReport}
                       environmentId={props.environmentId}
                       onClose={dismissUsageLimits}
+                    />
+                  </Animated.View>
+                ) : null}
+                {visibleUsageGuard && activeUserInputRequestId === null ? (
+                  <Animated.View
+                    className="shrink-0 px-4 pb-3"
+                    entering={FadeInDown.duration(220)}
+                    exiting={FadeOut.duration(140)}
+                  >
+                    <ComposerUsageGuard
+                      guard={visibleUsageGuard}
+                      onCompact={() => void props.onUsageGuardCompact?.()}
+                      onKeepGoing={() => void props.onUsageGuardKeepGoing?.()}
+                      onResume={() => void props.onUsageGuardResume?.()}
+                      onDismiss={() => {
+                        if (usageGuardPromptKey === null) return;
+                        setDismissedUsageGuardPrompts((keys) =>
+                          new Set(keys).add(usageGuardPromptKey),
+                        );
+                      }}
                     />
                   </Animated.View>
                 ) : null}

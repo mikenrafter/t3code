@@ -28,6 +28,7 @@ import {
   readEnvironmentSupportsActiveReorder,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
+  readEnvironmentSupportsUsageGuard,
   readEnvironmentThreadRefs,
   readProject,
   readThreadShell,
@@ -86,6 +87,18 @@ export class ThreadSnoozeBlockedError extends Schema.TaggedError<ThreadSnoozeBlo
 ) {
   override get message(): string {
     return "This thread is waiting on you. Respond to the pending request before snoozing it.";
+  }
+}
+
+export class ThreadUsageGuardUnsupportedError extends Schema.TaggedError<ThreadUsageGuardUnsupportedError>()(
+  "ThreadUsageGuardUnsupportedError",
+  {
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+  },
+) {
+  override get message(): string {
+    return "This environment's server does not support usage limits yet. Update the server.";
   }
 }
 
@@ -205,6 +218,15 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const unsnoozeThreadMutation = useAtomCommand(threadEnvironment.unsnooze, {
+    reportFailure: false,
+  });
+  const usageGuardSuppressMutation = useAtomCommand(threadEnvironment.usageGuardSuppress, {
+    reportFailure: false,
+  });
+  const usageGuardCompactMutation = useAtomCommand(threadEnvironment.usageGuardCompact, {
+    reportFailure: false,
+  });
+  const usageGuardResumeMutation = useAtomCommand(threadEnvironment.usageGuardResume, {
     reportFailure: false,
   });
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession);
@@ -722,6 +744,71 @@ export function useThreadActions() {
     [unsnoozeThreadMutation],
   );
 
+  // Guard answers are one-shot per window period, so a stale windowId from a
+  // raced prompt reads back as a server invariant error; the banner dismisses
+  // on success and the toast carries the failure otherwise.
+  const usageGuardSuppress = useCallback(
+    async (target: ScopedThreadRef, windowId: string) => {
+      if (!readEnvironmentSupportsUsageGuard(target.environmentId)) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new ThreadUsageGuardUnsupportedError({
+              environmentId: target.environmentId,
+              threadId: target.threadId,
+            }),
+          ),
+        );
+      }
+      return usageGuardSuppressMutation({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, windowId },
+      });
+    },
+    [usageGuardSuppressMutation],
+  );
+
+  const usageGuardCompact = useCallback(
+    async (target: ScopedThreadRef, windowId: string) => {
+      if (!readEnvironmentSupportsUsageGuard(target.environmentId)) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new ThreadUsageGuardUnsupportedError({
+              environmentId: target.environmentId,
+              threadId: target.threadId,
+            }),
+          ),
+        );
+      }
+      return usageGuardCompactMutation({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, windowId },
+      });
+    },
+    [usageGuardCompactMutation],
+  );
+
+  // A manual resume only fires when the guard's schedule still matches (the
+  // server no-ops otherwise), so it can never surprise a running thread.
+  const usageGuardResume = useCallback(
+    async (target: ScopedThreadRef, scheduledAt: string) => {
+      if (!readEnvironmentSupportsUsageGuard(target.environmentId)) {
+        return AsyncResult.failure(
+          Cause.fail(
+            new ThreadUsageGuardUnsupportedError({
+              environmentId: target.environmentId,
+              threadId: target.threadId,
+            }),
+          ),
+        );
+      }
+      return usageGuardResumeMutation({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, scheduledAt },
+      });
+    },
+    [usageGuardResumeMutation],
+  );
+
   const confirmAndDeleteThread = useCallback(
     async (target: ScopedThreadRef) => {
       const localApi = readLocalApi();
@@ -761,6 +848,9 @@ export function useThreadActions() {
       unsettleThread,
       snoozeThread,
       unsnoozeThread,
+      usageGuardSuppress,
+      usageGuardCompact,
+      usageGuardResume,
       pinThread,
       unpinThread,
       confirmAndUnpinThread,
@@ -781,6 +871,9 @@ export function useThreadActions() {
       unpinThread,
       unsettleThread,
       unsnoozeThread,
+      usageGuardCompact,
+      usageGuardSuppress,
+      usageGuardResume,
     ],
   );
 }

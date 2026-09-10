@@ -232,6 +232,7 @@ const makeWithProviderRegistry = (
         threadAutoSettlement: true,
         threadRestartContinuation: true,
         threadSnooze: true,
+        threadUsageGuard: true,
         environmentThemes: true,
         usageLimitSources: true,
         usagePriceOverrides: true,

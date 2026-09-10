@@ -696,6 +696,65 @@ function ThreadRouteContent(
     });
   }, [interruptThreadTurn, selectedThread]);
 
+  // The usage guard's answers (see the web banner): compact pauses and
+  // compacts, keep going suppresses the prompts until the window resets, and
+  // a manual resume only fires when the guard's schedule still matches.
+  const usageGuardCompactCommand = useAtomCommand(threadEnvironment.usageGuardCompact, {
+    reportFailure: false,
+  });
+  const usageGuardSuppressCommand = useAtomCommand(threadEnvironment.usageGuardSuppress, {
+    reportFailure: false,
+  });
+  const usageGuardResumeCommand = useAtomCommand(threadEnvironment.usageGuardResume, {
+    reportFailure: false,
+  });
+  const usageGuardActionsEnabled =
+    selectedThread !== null &&
+    selectedThread.usageGuard != null &&
+    serverConfig?.environment.capabilities.threadUsageGuard === true;
+  const handleUsageGuardCompact = useCallback(async () => {
+    const guard = selectedThread?.usageGuard;
+    if (selectedThread === undefined || selectedThread === null || guard == null) return;
+    const result = await usageGuardCompactCommand({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id, windowId: guard.windowId },
+    });
+    if (result._tag === "Failure") {
+      Alert.alert("Could not compact thread", "Compaction failed. Try again.");
+    }
+  }, [selectedThread, usageGuardCompactCommand]);
+  const handleUsageGuardKeepGoing = useCallback(async () => {
+    const guard = selectedThread?.usageGuard;
+    if (selectedThread === undefined || selectedThread === null || guard == null) return;
+    const result = await usageGuardSuppressCommand({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id, windowId: guard.windowId },
+    });
+    if (result._tag === "Failure") {
+      Alert.alert("Could not save setting", "Try again.");
+    }
+  }, [selectedThread, usageGuardSuppressCommand]);
+  const handleUsageGuardResume = useCallback(async () => {
+    const guard = selectedThread?.usageGuard;
+    const scheduledAt = guard?.phase === "paused" ? guard.scheduledAt : null;
+    if (
+      selectedThread === undefined ||
+      selectedThread === null ||
+      guard == null ||
+      scheduledAt === null ||
+      scheduledAt === undefined
+    ) {
+      return;
+    }
+    const result = await usageGuardResumeCommand({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id, scheduledAt },
+    });
+    if (result._tag === "Failure") {
+      Alert.alert("Could not resume thread", "Try again.");
+    }
+  }, [selectedThread, usageGuardResumeCommand]);
+
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {
       terminalDebugLog("terminal-menu:open-existing", {
@@ -1096,6 +1155,9 @@ function ThreadRouteContent(
           onChangeUserInputCustomAnswer={requests.onChangeUserInputCustomAnswer}
           onSubmitUserInput={requests.onSubmitUserInput}
           onDismissUserInput={requests.onDismissUserInput}
+          onUsageGuardCompact={usageGuardActionsEnabled ? handleUsageGuardCompact : undefined}
+          onUsageGuardKeepGoing={usageGuardActionsEnabled ? handleUsageGuardKeepGoing : undefined}
+          onUsageGuardResume={usageGuardActionsEnabled ? handleUsageGuardResume : undefined}
         />
       </View>
     </>

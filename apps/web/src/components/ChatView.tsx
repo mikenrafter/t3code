@@ -231,9 +231,11 @@ import {
   AlarmClockIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
+  GaugeIcon,
   GitBranchIcon,
   Minimize2Icon,
   PaperclipIcon,
+  PauseIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
@@ -1436,7 +1438,15 @@ export default function ChatView(props: ChatViewProps) {
   const threadSyncPhase = routeKind === "server" ? (props.threadSyncPhase ?? null) : null;
   const threadDetailLoading = threadSyncPhase === "loading";
   const handleNewThread = useNewThreadHandler();
-  const { settleThread, pinThread, confirmAndUnpinThread, snoozeThread } = useThreadActions();
+  const {
+    settleThread,
+    pinThread,
+    confirmAndUnpinThread,
+    snoozeThread,
+    usageGuardSuppress,
+    usageGuardCompact,
+    usageGuardResume,
+  } = useThreadActions();
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
@@ -6136,6 +6146,172 @@ export default function ChatView(props: ChatViewProps) {
             ? "Compaction is unavailable for this provider"
             : "Compacting is unavailable right now"
     : null;
+  // The usage guard's persisted prompt/pause (server-side state; see the
+  // server's UsageGuardReactor). Prompted offers the spec's answers; paused
+  // advertises the auto-resume the schedule promises.
+  const activeUsageGuard = activeThreadShell?.usageGuard ?? null;
+  // Session-scoped prompt dismissals keyed per (thread, window period): the
+  // "wait" answer, so the next window's prompt still shows.
+  const [dismissedUsageGuardPrompts, setDismissedUsageGuardPrompts] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const usageGuardPromptKey =
+    activeThread && activeUsageGuard?.phase === "prompted"
+      ? `${activeThread.id}:${activeUsageGuard.windowId}:${activeUsageGuard.windowResetsAt ?? ""}`
+      : null;
+  const handleUsageGuardCompact = useCallback(async () => {
+    if (activeThreadRef === null || activeUsageGuard === null) return;
+    // No success toast: the paused banner and the Compacting indicator take
+    // over from this one.
+    const result = await usageGuardCompact(activeThreadRef, activeUsageGuard.windowId);
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to compact thread",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    }
+  }, [activeThreadRef, activeUsageGuard, usageGuardCompact]);
+  const handleUsageGuardCompactAndContinue = useCallback(() => {
+    if (compactDisabled) return;
+    composerRef.current?.compactContext();
+  }, [compactDisabled, composerRef]);
+  const handleUsageGuardSuppress = useCallback(async () => {
+    if (activeThreadRef === null || activeUsageGuard === null) return;
+    const result = await usageGuardSuppress(activeThreadRef, activeUsageGuard.windowId);
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to save usage limit setting",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    }
+  }, [activeThreadRef, activeUsageGuard, usageGuardSuppress]);
+  const handleUsageGuardResume = useCallback(async () => {
+    if (
+      activeThreadRef === null ||
+      activeUsageGuard?.phase !== "paused" ||
+      activeUsageGuard.scheduledAt === null ||
+      activeUsageGuard.scheduledAt === undefined
+    ) {
+      return;
+    }
+    const result = await usageGuardResume(activeThreadRef, activeUsageGuard.scheduledAt);
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to resume thread",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    }
+  }, [activeThreadRef, activeUsageGuard, usageGuardResume]);
+  const usageGuardPromptBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (activeUsageGuard === null || usageGuardPromptKey === null) return null;
+    if (dismissedUsageGuardPrompts.has(usageGuardPromptKey)) return null;
+    const guard = activeUsageGuard;
+    return {
+      id: `usage-guard-prompt:${usageGuardPromptKey}`,
+      variant: "warning",
+      icon: <GaugeIcon />,
+      title: `Usage window at ${guard.usedPercent}%`,
+      description: `Consider waiting for the window to reset${
+        guard.windowResetsAt === null || guard.windowResetsAt === undefined
+          ? ""
+          : ` (${snoozeWakeDescription(guard.windowResetsAt, nowMinuteDate, timestampFormat)})`
+      } or compacting now.`,
+      actions: (
+        <>
+          <Button size="xs" variant="ghost" onClick={() => void handleUsageGuardCompact()}>
+            Compact
+          </Button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span className="inline-flex">
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    disabled={compactDisabled}
+                    onClick={handleUsageGuardCompactAndContinue}
+                  >
+                    Compact &amp; continue
+                  </Button>
+                </span>
+              }
+            />
+            <TooltipPopup side="top">
+              {compactDisabled
+                ? "Compacting is unavailable while work is pending"
+                : "Compact, then keep the thread running"}
+            </TooltipPopup>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span className="inline-flex">
+                  <Button size="xs" variant="ghost" onClick={() => void handleUsageGuardSuppress()}>
+                    Keep going
+                  </Button>
+                </span>
+              }
+            />
+            <TooltipPopup side="top">
+              Don't compact — disables the usage-limit prompts until the window resets
+            </TooltipPopup>
+          </Tooltip>
+        </>
+      ),
+      dismissLabel: "Wait for the window to reset",
+      onDismiss: () =>
+        setDismissedUsageGuardPrompts((keys) => new Set(keys).add(usageGuardPromptKey)),
+    };
+  }, [
+    activeUsageGuard,
+    compactDisabled,
+    composerRef,
+    dismissedUsageGuardPrompts,
+    handleUsageGuardCompact,
+    handleUsageGuardCompactAndContinue,
+    handleUsageGuardSuppress,
+    nowMinuteDate,
+    timestampFormat,
+    usageGuardPromptKey,
+  ]);
+  const usageGuardPausedBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    const guard = activeUsageGuard;
+    if (guard === null || guard.phase !== "paused") return null;
+    const resumable = guard.scheduledAt !== null && guard.scheduledAt !== undefined;
+    return {
+      id: `usage-guard-paused:${activeThread?.id ?? ""}:${guard.scheduledAt ?? guard.updatedAt}`,
+      variant: "warning",
+      icon: <PauseIcon />,
+      title:
+        guard.reason === "provider_error"
+          ? "Paused — the provider hit its usage limit"
+          : "Paused — usage window nearly exhausted",
+      description: resumable
+        ? `The thread will resume${
+            guard.resumeAt === null || guard.resumeAt === undefined
+              ? ""
+              : ` at ${snoozeWakeDescription(guard.resumeAt, nowMinuteDate, timestampFormat)}`
+          }, and the agent decides whether the work is still relevant.`
+        : "The thread stays paused until you resume it.",
+      actions: (
+        <Button size="xs" variant="ghost" onClick={() => void handleUsageGuardResume()}>
+          Resume now
+        </Button>
+      ),
+    };
+  }, [activeThread?.id, activeUsageGuard, handleUsageGuardResume, nowMinuteDate, timestampFormat]);
   const resumeCompactionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (
       !activeThread ||
@@ -6236,6 +6412,10 @@ export default function ChatView(props: ChatViewProps) {
     // The user asked for this one, so it leads the notice tier instead of trailing it.
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const usageLimitItems = usageLimitBannerItem === null ? [] : [usageLimitBannerItem];
+    const usageGuardPromptItems =
+      usageGuardPromptBannerItem === null ? [] : [usageGuardPromptBannerItem];
+    const usageGuardPausedItems =
+      usageGuardPausedBannerItem === null ? [] : [usageGuardPausedBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
@@ -6244,6 +6424,8 @@ export default function ChatView(props: ChatViewProps) {
         ...systemComposerBannerItems,
         ...backgroundLivenessItems,
         ...usageLimitItems,
+        ...usageGuardPromptItems,
+        ...usageGuardPausedItems,
         ...resumeCompactionItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
@@ -6256,6 +6438,8 @@ export default function ChatView(props: ChatViewProps) {
       ...systemComposerBannerItems,
       ...backgroundLivenessItems,
       ...usageLimitItems,
+      ...usageGuardPromptItems,
+      ...usageGuardPausedItems,
       ...resumeCompactionItems,
       ...wokeThreadItems,
       {
@@ -6312,6 +6496,8 @@ export default function ChatView(props: ChatViewProps) {
     systemComposerBannerItems,
     usageLimitsBanner,
     usageLimitBannerItem,
+    usageGuardPromptBannerItem,
+    usageGuardPausedBannerItem,
     wokeThreadBannerItem,
   ]);
   useEffect(() => {
