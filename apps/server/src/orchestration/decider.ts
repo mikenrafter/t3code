@@ -45,7 +45,7 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
-import { usageGuardContinuationText } from "./UsageGuardPolicy.ts";
+import { resolveGuardResumeAt, usageGuardContinuationText } from "./UsageGuardPolicy.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
 
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
@@ -802,6 +802,64 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           guard: command.guard,
           updatedAt: alreadySettled ? thread.updatedAt : command.createdAt,
         },
+      };
+    }
+
+    case "thread.usage-guard.compact": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const occurredAt = yield* nowIso;
+      const guard = thread.usageGuard ?? null;
+      // Same stale-window rule as suppress: the answer names the prompt's
+      // window, and a guard for another window is not the one being answered.
+      // A suppressed guard stays suppressed — the user already chose to keep
+      // going for this window period.
+      if (guard === null || guard.windowId !== command.windowId || guard.phase === "suppressed") {
+        return yield* Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `thread ${command.threadId} has no prompted usage guard for window '${command.windowId}'`,
+          }),
+        );
+      }
+      if (guard.phase === "paused") {
+        // Already settled: re-emit with the stored timestamps so a
+        // double-press is a projection no-op. The reactor's compaction is
+        // keyed on the pause's scheduledAt, so the re-emitted settle cannot
+        // start a second compaction.
+        return {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.usage-guard.settled",
+          payload: { threadId: command.threadId, guard, updatedAt: thread.updatedAt },
+        };
+      }
+      const pausedGuard = {
+        ...guard,
+        phase: "paused" as const,
+        resumeAt: resolveGuardResumeAt({
+          window: { kind: guard.windowKind, resetsAt: guard.windowResetsAt ?? undefined },
+          nowMs: Date.parse(occurredAt),
+        }),
+        scheduledAt: occurredAt,
+        updatedAt: occurredAt,
+      };
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.usage-guard.settled",
+        payload: { threadId: command.threadId, guard: pausedGuard, updatedAt: occurredAt },
       };
     }
 

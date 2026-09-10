@@ -16,6 +16,7 @@ import { decideOrchestrationCommand } from "./decider.ts";
 const NOW = "2026-01-01T00:00:00.000Z";
 // The decider's clock is the Effect test clock, pinned to the epoch, so
 // timestamps the decider stamps itself land at 1970-01-01T00:00:00.000Z.
+const DECIDER_NOW = "1970-01-01T00:00:00.000Z";
 const SETTLED_AT = "2026-01-04T00:00:00.000Z";
 const RESUME_NOW = "2026-01-05T00:00:00.000Z";
 
@@ -256,6 +257,151 @@ it.layer(NodeServices.layer)("usage-guard decider", (it) => {
       if (event?.type === "thread.usage-guard.settled") {
         expect(event.payload.updatedAt).toBe(NOW);
       }
+    }));
+
+  it("compacts a prompted guard into its paused schedule", () =>
+    Effect.gen(function* () {
+      const resetsAt = "2026-01-01T03:00:00.000Z";
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.usage-guard.compact",
+          commandId: CommandId.make("cmd-compact"),
+          threadId: ThreadId.make("thread-1"),
+          windowId: "five_hour",
+          createdAt: NOW,
+        },
+        readModel: makeReadModel({
+          usageGuard: makeGuard({ phase: "prompted", windowResetsAt: resetsAt }),
+        }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(1);
+      const event = events[0];
+      if (event?.type === "thread.usage-guard.settled") {
+        expect(event.payload.guard.phase).toBe("paused");
+        // The schedule math (reset honored, 5h cap) lives in the policy; the
+        // decider just anchors it at its own clock.
+        expect(event.payload.guard.resumeAt).toBe("1970-01-01T05:00:00.000Z");
+        expect(event.payload.guard.scheduledAt).toBe(DECIDER_NOW);
+        expect(event.payload.guard.windowId).toBe("five_hour");
+        expect(event.payload.updatedAt).toBe(DECIDER_NOW);
+      }
+    }));
+
+  it("caps a compact's resume at five hours out", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.usage-guard.compact",
+          commandId: CommandId.make("cmd-compact-cap"),
+          threadId: ThreadId.make("thread-1"),
+          windowId: "five_hour",
+          createdAt: NOW,
+        },
+        readModel: makeReadModel({
+          usageGuard: makeGuard({ phase: "prompted", windowResetsAt: null }),
+        }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const event = events[0];
+      if (event?.type === "thread.usage-guard.settled") {
+        expect(event.payload.guard.resumeAt).toBe("1970-01-01T05:00:00.000Z");
+      }
+    }));
+
+  it("rejects compacting without a prompted guard for the named window", () =>
+    Effect.gen(function* () {
+      const noGuard = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.usage-guard.compact",
+            commandId: CommandId.make("cmd-compact-none"),
+            threadId: ThreadId.make("thread-1"),
+            windowId: "five_hour",
+            createdAt: NOW,
+          },
+          readModel: makeReadModel({}),
+        }),
+      );
+      expect(noGuard._tag).toBe("OrchestrationCommandInvariantError");
+
+      const staleWindow = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.usage-guard.compact",
+            commandId: CommandId.make("cmd-compact-stale"),
+            threadId: ThreadId.make("thread-1"),
+            windowId: "five_hour",
+            createdAt: NOW,
+          },
+          readModel: makeReadModel({
+            usageGuard: makeGuard({ phase: "prompted", windowId: "primary" }),
+          }),
+        }),
+      );
+      expect(staleWindow._tag).toBe("OrchestrationCommandInvariantError");
+
+      // A suppressed window stays suppressed: the user already chose to keep
+      // going for this period.
+      const suppressed = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.usage-guard.compact",
+            commandId: CommandId.make("cmd-compact-suppressed"),
+            threadId: ThreadId.make("thread-1"),
+            windowId: "five_hour",
+            createdAt: NOW,
+          },
+          readModel: makeReadModel({
+            usageGuard: {
+              ...makeGuard({ phase: "suppressed" }),
+              suppressUntil: "2026-01-01T05:00:00.000Z",
+            },
+          }),
+        }),
+      );
+      expect(suppressed._tag).toBe("OrchestrationCommandInvariantError");
+    }));
+
+  it("re-emits a compact without churning when the thread already paused", () =>
+    Effect.gen(function* () {
+      const existing = makeGuard({ phase: "paused", scheduledAt: SETTLED_AT });
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.usage-guard.compact",
+          commandId: CommandId.make("cmd-compact-again"),
+          threadId: ThreadId.make("thread-1"),
+          windowId: "five_hour",
+          createdAt: RESUME_NOW,
+        },
+        readModel: makeReadModel({ usageGuard: existing }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const event = events[0];
+      if (event?.type === "thread.usage-guard.settled") {
+        expect(event.payload.guard).toEqual(existing);
+        expect(event.payload.updatedAt).toBe(NOW);
+      }
+    }));
+
+  it("rejects compacting an archived thread", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.usage-guard.compact",
+            commandId: CommandId.make("cmd-compact-archived"),
+            threadId: ThreadId.make("thread-1"),
+            windowId: "five_hour",
+            createdAt: NOW,
+          },
+          readModel: makeReadModel({
+            archivedAt: NOW,
+            usageGuard: makeGuard({ phase: "prompted" }),
+          }),
+        }),
+      );
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
     }));
 
   it("resumes a paused guard with its continuation turn", () =>

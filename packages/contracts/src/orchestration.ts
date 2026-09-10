@@ -1166,6 +1166,18 @@ const ThreadUsageGuardSuppressCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+// The "Compact" answer to the guard's 90% prompt: pause the thread now and
+// compact before the window resets, rather than waiting for the 95%
+// escalation. The prompt's "compact & continue" answer is a plain /compact
+// turn start — the guard record stays armed for the 95% threshold.
+const ThreadUsageGuardCompactCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-guard.compact"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  windowId: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
 const ThreadUsageGuardSettleCommand = Schema.Struct({
   type: Schema.Literal("thread.usage-guard.settle"),
   commandId: CommandId,
@@ -1428,6 +1440,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
   ThreadUsageGuardSuppressCommand,
+  ThreadUsageGuardCompactCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -1461,6 +1474,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
   ThreadUsageGuardSuppressCommand,
+  ThreadUsageGuardCompactCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1594,6 +1608,11 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadPullRequestLinkSyncCommand,
   ThreadUsageGuardSettleCommand,
   ThreadUsageGuardResumeCommand,
+  // Server-initiated turns: the usage guard reactor interrupts a running turn
+  // when it settles a thread and dispatches the /compact turn that pause
+  // promises.
+  ThreadTurnInterruptCommand,
+  ThreadTurnStartCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
