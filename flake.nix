@@ -22,12 +22,10 @@
         lib = nixpkgs.lib;
         agents = llm-agents.packages.${system};
 
-        # Electron comes from llm-agents' own nixpkgs pin (unfree). This branch
-        # depends on Electron 43.x; the llm-agents packaging still wired into
-        # this flake (and into phoe-nix via follows) takes an `electron_41`
-        # callPackage arg and aborts when upstream's major is newer. Pass
-        # electron_43 through that slot. Drop this override once the followed
-        # llm-agents rev includes "t3code: switch to electron_43" (3e108f2a).
+        # Electron is unfree; llm-agents' packaging (post 3e108f2a) takes
+        # `electron_43` from its own nixpkgs pin. Import that pin with
+        # allowUnfree and pass it through so eval does not hit the free-only
+        # consumer nixpkgs.
         agentsPkgs = import llm-agents.inputs.nixpkgs {
           inherit system;
           config.allowUnfree = true;
@@ -46,7 +44,7 @@
         t3code = agents.t3code.override {
           t3code-unwrapped =
             (agents.t3code.unwrapped.override {
-              electron_41 = agentsPkgs.electron_43;
+              electron_43 = agentsPkgs.electron_43;
             }).overrideAttrs
               (old: {
                 src = self;
