@@ -11,6 +11,7 @@ import {
   RuntimeTaskId,
   RuntimeRequestId,
   ThreadId,
+  type ThreadTokenUsageSnapshot,
   type ToolLifecycleItemType,
   type TurnTokenUsage,
   TurnId,
@@ -405,6 +406,10 @@ interface OpenCodeTurnTokenUsageAccumulator {
   cacheCreationTokens: number;
   outputTokens: number;
   reasoningTokens: number;
+  /** The most recent step's prompt size (input incl. cache reads and writes). */
+  lastStepInputTokens: number;
+  cachedLastStepInputTokens: number;
+  lastStepOutputTokens: number;
   complete: boolean;
   hasSubagents: boolean;
 }
@@ -420,6 +425,9 @@ function makeOpenCodeTurnTokenUsageAccumulator(): OpenCodeTurnTokenUsageAccumula
     cacheCreationTokens: 0,
     outputTokens: 0,
     reasoningTokens: 0,
+    lastStepInputTokens: 0,
+    cachedLastStepInputTokens: 0,
+    lastStepOutputTokens: 0,
     complete: true,
     hasSubagents: false,
   };
@@ -436,6 +444,12 @@ function accumulateOpenCodeStepUsage(
   accumulator.cacheCreationTokens += part.tokens.cache.write;
   accumulator.outputTokens += part.tokens.output + part.tokens.reasoning;
   accumulator.reasoningTokens += part.tokens.reasoning;
+  // Each step's input re-reads the whole context, so the latest step's
+  // input plus its output is the occupancy the context meter should show.
+  accumulator.lastStepInputTokens =
+    part.tokens.input + part.tokens.cache.read + part.tokens.cache.write;
+  accumulator.cachedLastStepInputTokens = part.tokens.cache.read;
+  accumulator.lastStepOutputTokens = part.tokens.output + part.tokens.reasoning;
 }
 
 function takeOpenCodeTurnTokenUsage(
@@ -463,6 +477,29 @@ function takeOpenCodeTurnTokenUsage(
     outputTokens: usage.outputTokens,
     reasoningTokens: Math.min(usage.outputTokens, usage.reasoningTokens),
     hasSubagents: usage.hasSubagents,
+  };
+}
+
+/**
+ * The context occupancy OpenCode's streams imply: each agent step re-reads
+ * the whole prompt, so the latest step's input plus its output is the size
+ * the meter should show. Real reported counts, not an estimate.
+ */
+function openCodeContextUsageSnapshot(
+  usage: OpenCodeTurnTokenUsageAccumulator,
+): ThreadTokenUsageSnapshot | undefined {
+  const usedTokens = usage.lastStepInputTokens + usage.lastStepOutputTokens;
+  if (usedTokens <= 0) {
+    return undefined;
+  }
+  return {
+    usedTokens,
+    lastUsedTokens: usedTokens,
+    ...(usage.lastStepInputTokens > 0 ? { inputTokens: usage.lastStepInputTokens } : {}),
+    ...(usage.cachedLastStepInputTokens > 0
+      ? { cachedInputTokens: usage.cachedLastStepInputTokens }
+      : {}),
+    ...(usage.lastStepOutputTokens > 0 ? { outputTokens: usage.lastStepOutputTokens } : {}),
   };
 }
 
@@ -1159,6 +1196,10 @@ export function makeOpenCodeAdapter(
       ) {
         context.pendingIdleReconciliation = undefined;
       }
+      const usageAccumulator = context.turnTokenUsage;
+      const contextUsage = usageAccumulator
+        ? openCodeContextUsageSnapshot(usageAccumulator)
+        : undefined;
       const tokenUsage = takeOpenCodeTurnTokenUsage(context, true);
       context.activeTurnId = undefined;
       context.activeAgent = undefined;
@@ -1192,6 +1233,18 @@ export function makeOpenCodeAdapter(
           tokenUsage,
         },
       });
+      if (contextUsage) {
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId: context.session.threadId,
+            turnId,
+          })),
+          type: "thread.token-usage.updated",
+          payload: {
+            usage: contextUsage,
+          },
+        });
+      }
     });
 
     const scheduleIdleReconciliation = Effect.fn("scheduleIdleReconciliation")(function* (

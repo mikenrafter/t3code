@@ -765,7 +765,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
               ? "stopped"
               : "completed",
         );
-          yield* adapter.stopSession(threadId);
+        yield* adapter.stopSession(threadId);
       }),
     );
   }
@@ -2424,9 +2424,14 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         idle.promise,
       ];
 
-      const completedFiber = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
-        Stream.runHead,
+      const settleEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "turn.completed" || event.type === "thread.token-usage.updated"),
+        ),
+        Stream.take(2),
+        Stream.runCollect,
         Effect.forkChild,
       );
       yield* adapter.startSession({
@@ -2604,10 +2609,13 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         },
       });
 
-      const completed = yield* Fiber.join(completedFiber).pipe(Effect.timeout("1 second"));
-      NodeAssert.equal(completed._tag, "Some");
-      if (completed._tag === "Some" && completed.value.type === "turn.completed") {
-        NodeAssert.deepStrictEqual(completed.value.payload.tokenUsage, {
+      const settleEvents = Array.from(
+        yield* Fiber.join(settleEventsFiber).pipe(Effect.timeout("1 second")),
+      );
+      const completed = settleEvents.find((event) => event.type === "turn.completed");
+      NodeAssert.ok(completed);
+      if (completed?.type === "turn.completed") {
+        NodeAssert.deepStrictEqual(completed.payload.tokenUsage, {
           usageStatus: "partial",
           usageScope: "main_agent",
           inputTokens: 246,
@@ -2616,6 +2624,22 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           outputTokens: 49,
           reasoningTokens: 9,
           hasSubagents: true,
+        });
+      }
+
+      // The meter's snapshot is the latest step's prompt size (36) plus its
+      // output (12) — real reported counts, not the turn's summed totals.
+      const contextUsage = settleEvents.find(
+        (event) => event.type === "thread.token-usage.updated",
+      );
+      NodeAssert.ok(contextUsage);
+      if (contextUsage?.type === "thread.token-usage.updated") {
+        NodeAssert.deepStrictEqual(contextUsage.payload.usage, {
+          usedTokens: 48,
+          lastUsedTokens: 48,
+          inputTokens: 36,
+          cachedInputTokens: 5,
+          outputTokens: 12,
         });
       }
 

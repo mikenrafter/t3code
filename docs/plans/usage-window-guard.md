@@ -18,15 +18,15 @@ integrate, adapted to this branch.
 
 ## Upstream PR integration (in dependency order)
 
-| PR | State | What it does | Integration decision |
-| --- | --- | --- | --- |
-| #10095 | open | Enforce configurable thread context limits; server gate before workspace prep | Cherry-pick, adapted: **global** setting, default **250k** (per-provider later if wanted) |
-| #10962 | open | `compacting` runtime session state (Claude auto-compaction renders as Compacting, not Thinking) | Cherry-pick, then **wire Codex (`contextCompaction` started) and OpenCode (`session.time.compacting`) signals** the PR left unwired |
-| #10550 | open | Show a usage-limit stop as **Limited** (warning tone) instead of **Failed** | Cherry-pick; supplies the `usage_limit` error class the guard's error trigger reads |
-| #9012 | open | Snooze a thread until provider limits reset (composer notice + snooze menus) | Cherry-pick; its composer notice shares the banner stack slot with the cache banner |
-| #8857 | open | Generate and preserve thread handover drafts when the context limit hits | Cherry-pick, adapted; simplest thing that reaches the same end goal (see #10097 note) |
-| #10097 | open | Reserve shared slots for concurrent provider work | Decision deferred: "do whatever's simplest while maintaining the desired end goal for #8857 and #10097" |
-| #8577 | closed | Resume threads after usage limits reset | **Adapted, not picked** — replaced by the guard below; its reusable pieces: native limit-error classification per provider, persisted scheduled state, safe cancellation |
+| PR     | State  | What it does                                                                                    | Integration decision                                                                                                                                                     |
+| ------ | ------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| #10095 | open   | Enforce configurable thread context limits; server gate before workspace prep                   | Cherry-pick, adapted: **global** setting, default **250k** (per-provider later if wanted)                                                                                |
+| #10962 | open   | `compacting` runtime session state (Claude auto-compaction renders as Compacting, not Thinking) | Cherry-pick, then **wire Codex (`contextCompaction` started) and OpenCode (`session.time.compacting`) signals** the PR left unwired                                      |
+| #10550 | open   | Show a usage-limit stop as **Limited** (warning tone) instead of **Failed**                     | Cherry-pick; supplies the `usage_limit` error class the guard's error trigger reads                                                                                      |
+| #9012  | open   | Snooze a thread until provider limits reset (composer notice + snooze menus)                    | Cherry-pick; its composer notice shares the banner stack slot with the cache banner                                                                                      |
+| #8857  | open   | Generate and preserve thread handover drafts when the context limit hits                        | Cherry-pick, adapted; simplest thing that reaches the same end goal (see #10097 note)                                                                                    |
+| #10097 | open   | Reserve shared slots for concurrent provider work                                               | Decision deferred: "do whatever's simplest while maintaining the desired end goal for #8857 and #10097"                                                                  |
+| #8577  | closed | Resume threads after usage limits reset                                                         | **Adapted, not picked** — replaced by the guard below; its reusable pieces: native limit-error classification per provider, persisted scheduled state, safe cancellation |
 
 Upstream's #10550 and #10962 both add migration `050`; renumber ours in pick
 order (latest here is `050_ProjectionThreadPullRequests`, so picks start at `051`).
@@ -84,8 +84,10 @@ Concrete rules:
 
 - Persisted per-thread token tracking; numbers shown as **estimated** where the
   provider does not report a count.
-- Base: last compaction's reported context + `chars/4` for providers without
-  token accounting (Cursor, Grok, OpenCode).
+- OpenCode reports real per-step counts (its last agent step's prompt size is
+  the occupancy). Cursor, Grok, and Antigravity have no token accounting and
+  get a `chars/4` estimate that restarts when a compaction turn rewrites the
+  context, so the compacted size re-estimates from the summary it streams.
 - The context meter stays **opt-in** (off by default), matching the existing
   usage-meter setting.
 

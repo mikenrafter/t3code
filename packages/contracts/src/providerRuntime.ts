@@ -336,10 +336,10 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   autoCompactThreshold: Schema.optional(PositiveInt),
   /**
    * The count is derived, not reported: providers whose streams carry no
-   * token accounting (Cursor, Grok, OpenCode, Antigravity) get a chars/4
-   * estimate anchored on the last compaction's reported context. Clients
-   * label estimated values (a "~" prefix) instead of presenting them as
-   * provider numbers.
+   * token accounting (Cursor, Grok, Antigravity) get a chars/4 estimate that
+   * restarts when a compaction turn rewrites the context. Clients label
+   * estimated values (a "~" prefix) instead of presenting them as provider
+   * numbers.
    */
   estimated: Schema.optional(Schema.Boolean),
 });
