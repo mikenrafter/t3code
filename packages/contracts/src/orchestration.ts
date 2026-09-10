@@ -33,6 +33,7 @@ import {
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
+  generateHandover: "orchestration.generateHandover",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getAgentHistory: "orchestration.getAgentHistory",
   getTurnDiff: "orchestration.getTurnDiff",
@@ -2234,6 +2235,10 @@ export const OrchestrationRpcSchemas = {
     input: OrchestrationGetAgentHistoryInput,
     output: OrchestrationGetAgentHistoryResult,
   },
+  generateHandover: {
+    input: Schema.Struct({ threadId: ThreadId }),
+    output: Schema.Struct({ handover: TrimmedNonEmptyString }),
+  },
   getWorkflowScript: {
     input: OrchestrationGetWorkflowScriptInput,
     output: OrchestrationGetWorkflowScriptResult,
@@ -2263,6 +2268,19 @@ export const OrchestrationRpcSchemas = {
     output: OrchestrationShellStreamItem,
   },
 } as const;
+
+export type OrchestrationGenerateHandoverInput =
+  typeof OrchestrationRpcSchemas.generateHandover.input.Type;
+export type OrchestrationGenerateHandoverResult =
+  typeof OrchestrationRpcSchemas.generateHandover.output.Type;
+
+export class OrchestrationGenerateHandoverError extends Schema.TaggedError<OrchestrationGenerateHandoverError>()(
+  "OrchestrationGenerateHandoverError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
 
 export class OrchestrationGetSnapshotError extends Schema.TaggedError<OrchestrationGetSnapshotError>()(
   "OrchestrationGetSnapshotError",
