@@ -23,6 +23,9 @@ export function ContextWindowMeter(props: {
   compactDisabledReason?: string | null | undefined;
 }) {
   const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
+  // Derived counts (Cursor, Grok, Antigravity) read as "~12k", never as
+  // provider-reported numbers.
+  const tokenPrefix = usage.estimated ? "~" : "";
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -49,7 +52,7 @@ export function ContextWindowMeter(props: {
             aria-label={
               usage.maxTokens !== null && usedPercentage
                 ? `Context window ${usedPercentage} used`
-                : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
+                : `Context window ${tokenPrefix}${formatContextWindowTokens(usage.usedTokens)} tokens used`
             }
           >
             <span className="relative flex size-5 items-center justify-center">
@@ -99,12 +102,14 @@ export function ContextWindowMeter(props: {
                 <span>{usedPercentage}</span>
                 <span className="mx-1">·</span>
                 <span>
+                  {tokenPrefix}
                   {formatContextWindowTokens(usage.usedTokens)}/
                   {formatContextWindowTokens(usage.maxTokens ?? null)}
                 </span>
               </div>
             ) : (
               <div className="text-secondary-label text-[11px] tabular-nums">
+                {tokenPrefix}
                 {formatContextWindowTokens(usage.usedTokens)}
               </div>
             )}

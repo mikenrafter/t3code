@@ -46,6 +46,18 @@ describe("contextWindow", () => {
     expect(snapshot?.maxTokens).toBe(258_000);
     expect(snapshot?.compactsAutomatically).toBe(true);
     expect(snapshot?.autoCompactThreshold).toBe(200_000);
+    expect(snapshot?.estimated).toBe(false);
+  });
+
+  it("carries the estimated flag from derived snapshots", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([
+      makeActivity("activity-1", "context-window.updated", {
+        usedTokens: 12_000,
+        estimated: true,
+      }),
+    ]);
+
+    expect(snapshot?.estimated).toBe(true);
   });
 
   it("ignores malformed payloads", () => {
