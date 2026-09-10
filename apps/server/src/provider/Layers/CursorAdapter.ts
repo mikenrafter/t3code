@@ -50,7 +50,11 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { acpPermissionOutcome, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import {
+  acpPermissionOutcome,
+  AcpContextEstimator,
+  mapAcpToAdapterError,
+} from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -58,6 +62,7 @@ import {
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
+  makeAcpTokenUsageEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import {
@@ -153,7 +158,12 @@ interface CursorSessionContext {
   promptsInFlight: number;
   assistantReply: CursorTransportFailure;
   stopped: boolean;
+  contextEstimate: AcpContextEstimator;
 }
+
+// The compaction slash command Cursor's agent answers; a turn whose prompt
+// starts with it rewrites the session's context.
+const CURSOR_COMPACT_COMMAND = "/compress";
 
 function settlePendingApprovalsAsCancelled(
   pendingApprovals: ReadonlyMap<ApprovalRequestId, PendingApproval>,
@@ -483,6 +493,24 @@ export function makeCursorAdapter(
           }),
         );
       });
+
+    const emitEstimatedContextUsage = Effect.fn("CursorAdapter.emitEstimatedContextUsage")(
+      function* (ctx: CursorSessionContext, turnId: TurnId | undefined) {
+        const usage = ctx.contextEstimate.endTurn();
+        if (!usage) {
+          return;
+        }
+        yield* offerRuntimeEvent(
+          makeAcpTokenUsageEvent({
+            stamp: yield* makeEventStamp(),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId,
+            usage,
+          }),
+        );
+      },
+    );
 
     const requireSession = (
       threadId: ThreadId,
@@ -824,6 +852,7 @@ export function makeCursorAdapter(
             promptsInFlight: 0,
             assistantReply: new CursorTransportFailure(),
             stopped: false,
+            contextEstimate: new AcpContextEstimator(),
           };
 
           const nf = yield* Stream.runDrain(
@@ -876,6 +905,7 @@ export function makeCursorAdapter(
                     );
                     return;
                   case "ToolCallUpdated":
+                    ctx.contextEstimate.addToolCallState(event.toolCall);
                     yield* logNative(
                       ctx.threadId,
                       "session/update",
@@ -895,6 +925,7 @@ export function makeCursorAdapter(
                     return;
                   case "ContentDelta":
                     ctx.assistantReply.push(event.text);
+                    ctx.contextEstimate.addAssistantText(event.text);
                     yield* logNative(
                       ctx.threadId,
                       "session/update",
@@ -1060,6 +1091,12 @@ export function makeCursorAdapter(
 
           const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
           const rawPrompt = input.input?.trim() ?? "";
+          if (steeringTurnId === undefined) {
+            ctx.contextEstimate.beginTurn({
+              compaction: rawPrompt.startsWith(CURSOR_COMPACT_COMMAND),
+            });
+          }
+          ctx.contextEstimate.addPromptText(rawPrompt);
           if (rawPrompt) {
             let cursorSkillNames = ctx.cursorSkillNames;
             if (hasCursorSkillMention(rawPrompt) && cursorSkillNames === undefined) {
@@ -1193,6 +1230,7 @@ export function makeCursorAdapter(
                 stopReason: result.stopReason ?? null,
               },
             });
+            yield* emitEstimatedContextUsage(ctx, turnId);
           }
 
           return {
@@ -1235,6 +1273,7 @@ export function makeCursorAdapter(
                           : collapsed,
                     },
                   });
+                  yield* emitEstimatedContextUsage(ctx, turnId);
                 }),
           ),
           // The last draining prompt settles a cancelled turn whose
@@ -1260,6 +1299,7 @@ export function makeCursorAdapter(
                     turnId,
                     payload: { state: "cancelled", stopReason: "cancelled" },
                   });
+                  yield* emitEstimatedContextUsage(ctx, turnId);
                 }
               }),
             ),
@@ -1391,7 +1431,7 @@ export function makeCursorAdapter(
     return {
       provider: PROVIDER,
       capabilities: { sessionModelSwitch: "in-session" },
-      compaction: { type: "slash-command", command: "/compress" },
+      compaction: { type: "slash-command", command: CURSOR_COMPACT_COMMAND },
       startSession,
       sendTurn,
       interruptTurn,

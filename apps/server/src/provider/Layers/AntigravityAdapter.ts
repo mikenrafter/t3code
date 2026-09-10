@@ -50,13 +50,14 @@ import {
   ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE,
   isAntigravitySignInRequiredError,
 } from "../antigravityAuthSupport.ts";
-import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { AcpContextEstimator, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
+  makeAcpTokenUsageEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
@@ -211,7 +212,12 @@ interface SessionContext {
   stopped: boolean;
   closed: boolean;
   disconnected: boolean;
+  contextEstimate: AcpContextEstimator;
 }
+
+// The compaction slash command Antigravity's agent answers; a turn whose
+// prompt starts with it rewrites the session's context.
+const ANTIGRAVITY_COMPACT_COMMAND = "/compact";
 
 const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -588,6 +594,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
         return;
       case "ThoughtDelta":
       case "ContentDelta":
+        context.contextEstimate.addAssistantText(event.text);
         yield* emit(
           makeAcpContentDeltaEvent({
             stamp: yield* stamp,
@@ -616,6 +623,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
         );
         return;
       case "ToolCallUpdated":
+        context.contextEstimate.addToolCallState(event.toolCall);
         yield* context.commandLock.withPermit(
           Effect.gen(function* () {
             const toolCall = normalizeAntigravityToolCall(event.toolCall);
@@ -880,6 +888,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
                 stopped: false,
                 closed: false,
                 disconnected: false,
+                contextEstimate: new AcpContextEstimator(),
               };
               const running = context;
               sessions.set(input.threadId, running);
@@ -1021,6 +1030,18 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
           turnId: turn.turnId,
           payload,
         });
+        const usage = context.contextEstimate.endTurn();
+        if (usage) {
+          yield* emit(
+            makeAcpTokenUsageEvent({
+              stamp: yield* stamp,
+              provider: PROVIDER,
+              threadId: input.threadId,
+              turnId: turn.turnId,
+              usage,
+            }),
+          );
+        }
       }).pipe(Effect.uninterruptible);
 
     return yield* Effect.gen(function* () {
@@ -1045,6 +1066,12 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
           const turn: TurnIntent = { turnId, generation: ++context.generation, settled: false };
           intent = turn;
           context.activeTurnId = turnId;
+          if (!steering) {
+            context.contextEstimate.beginTurn({
+              compaction: (input.input ?? "").startsWith(ANTIGRAVITY_COMPACT_COMMAND),
+            });
+          }
+          context.contextEstimate.addPromptText(input.input ?? "");
           if (!steering) {
             yield* emit({
               type: "turn.started",
@@ -1245,7 +1272,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
   return {
     provider: PROVIDER,
     capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: false },
-    compaction: { type: "slash-command", command: "/compact" },
+    compaction: { type: "slash-command", command: ANTIGRAVITY_COMPACT_COMMAND },
     startSession,
     sendTurn,
     interruptTurn,

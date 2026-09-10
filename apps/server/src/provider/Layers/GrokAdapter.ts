@@ -49,7 +49,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import { AcpContextEstimator, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -57,6 +57,7 @@ import {
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
+  makeAcpTokenUsageEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
@@ -178,7 +179,12 @@ interface GrokSessionContext {
   currentModelId: string | undefined;
   currentReasoningEffort: string | undefined;
   stopped: boolean;
+  contextEstimate: AcpContextEstimator;
 }
+
+// The compaction slash command Grok's agent answers; a turn whose prompt
+// starts with it rewrites the session's context.
+const GROK_COMPACT_COMMAND = "/compact";
 
 function settlePendingApprovalsAsCancelled(
   pendingApprovals: ReadonlyMap<ApprovalRequestId, PendingApproval>,
@@ -589,6 +595,25 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
       ctx.promptResponsesReady = Math.max(0, ctx.promptResponsesReady - 1);
     };
 
+    const emitEstimatedContextUsage = Effect.fn("GrokAdapter.emitEstimatedContextUsage")(function* (
+      ctx: GrokSessionContext,
+      turnId: TurnId | undefined,
+    ) {
+      const usage = ctx.contextEstimate.endTurn();
+      if (!usage) {
+        return;
+      }
+      yield* offerRuntimeEvent(
+        makeAcpTokenUsageEvent({
+          stamp: yield* makeEventStamp(),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          usage,
+        }),
+      );
+    });
+
     const settlePromptInFlight = (
       threadId: ThreadId,
       turnId: TurnId,
@@ -729,6 +754,9 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               stopReason: options.completedStopReason ?? null,
             },
           });
+        }
+        if (shouldEmitFailedTurn || shouldEmitCompletedTurn) {
+          yield* emitEstimatedContextUsage(liveCtx, settleTurnId);
         }
       });
 
@@ -1339,6 +1367,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             activeToolCallIds: new Set(),
             livenessUpdatesInFlight: 0,
             promptResponsesReady: 0,
+            contextEstimate: new AcpContextEstimator(),
             currentModelId: boundModelId,
             currentReasoningEffort:
               requestedStartReasoningEffort !== undefined
@@ -1420,6 +1449,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     );
                     return;
                   case "ToolCallUpdated": {
+                    ctx.contextEstimate.addToolCallState(event.toolCall);
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp,
@@ -1455,6 +1485,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     return;
                   }
                   case "ContentDelta":
+                    ctx.contextEstimate.addAssistantText(event.text);
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
                         stamp,
@@ -1561,6 +1592,12 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               );
 
               const text = input.input?.trim();
+              if (steeringTurnId === undefined) {
+                ctx.contextEstimate.beginTurn({
+                  compaction: (text ?? "").startsWith(GROK_COMPACT_COMMAND),
+                });
+              }
+              ctx.contextEstimate.addPromptText(text ?? "");
               // Grok ingests images only. Generic files reach the agent
               // through the path line ProviderService puts in the prompt.
               const imagePromptParts = yield* Effect.forEach(
@@ -1912,6 +1949,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     stopReason: completedStopReason,
                   },
                 });
+                yield* emitEstimatedContextUsage(ctx, prepared.turnId);
                 ctx.interruptedTurnIds.delete(prepared.turnId);
                 yield* Ref.set(promptSettled, true);
               } else if (remainingPrompts > 0) {
@@ -2209,7 +2247,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     return {
       provider: PROVIDER,
       capabilities: { sessionModelSwitch: "in-session" },
-      compaction: { type: "slash-command", command: "/compact" },
+      compaction: { type: "slash-command", command: GROK_COMPACT_COMMAND },
       startSession,
       sendTurn,
       interruptTurn,
