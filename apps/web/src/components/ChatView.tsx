@@ -1172,7 +1172,38 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
           "min-h-0 overflow-clip",
           visible && fillColumn && "flex min-w-0 flex-1 flex-col",
         )}
-      >    </div>
+      >
+        <ThreadTerminalDrawer
+          threadRef={threadRef}
+          threadId={threadId}
+          cwd={cwd}
+          worktreePath={effectiveWorktreePath}
+          runtimeEnv={runtimeEnv}
+          visible={visible}
+          height={terminalUiState.terminalHeight}
+          // Known-session order is MRU and changes on focus; persisted store order keeps sidebar labels stable.
+          terminalIds={terminalUiState.terminalIds}
+          activeTerminalId={terminalUiState.activeTerminalId}
+          terminalGroups={terminalUiState.terminalGroups}
+          activeTerminalGroupId={terminalUiState.activeTerminalGroupId}
+          focusRequestId={focusRequestId + localFocusRequestId + (visible ? 1 : 0)}
+          onSplitTerminal={splitTerminal}
+          onSplitTerminalVertical={splitTerminalVertical}
+          onNewTerminal={createNewTerminal}
+          splitShortcutLabel={visible ? splitShortcutLabel : undefined}
+          splitVerticalShortcutLabel={visible ? splitVerticalShortcutLabel : undefined}
+          newShortcutLabel={visible ? newShortcutLabel : undefined}
+          closeShortcutLabel={visible ? closeShortcutLabel : undefined}
+          keybindings={keybindings}
+          onActiveTerminalChange={activateTerminal}
+          onCloseTerminal={closeTerminal}
+          onHeightChange={setTerminalHeight}
+          onAddTerminalContext={handleAddTerminalContext}
+          terminalLabelsById={terminalLabelsById}
+          terminalLaunchLocationsById={terminalLaunchLocationsById}
+        />
+      </div>
+    </div>
   );
 });
 
@@ -8704,6 +8735,7 @@ export default function ChatView(props: ChatViewProps) {
       ) : null}
       {rightPanelPresent && shouldUseRightPanelSheet && activeThreadRef ? (
         <RightPanelSheet
+          gestureProps={panelGestureProps}
           animationDurationMs={panelAnimationsActive ? panelAnimationDurationMs : 0}
           open={rightPanelOpen}
           underFloatingPreview={previewMiniPlayerVisible}

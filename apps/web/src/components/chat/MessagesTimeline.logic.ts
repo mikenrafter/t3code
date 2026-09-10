@@ -90,6 +90,47 @@ export function liveWorkEntryLabel(
   return workEntryDisplayLabel(entry, workspaceRoot);
 }
 
+export function workEntryRawCommand(
+  workEntry: Pick<WorkLogEntry, "command" | "rawCommand">,
+): string | null {
+  const rawCommand = workEntry.rawCommand?.trim();
+  if (!rawCommand || !workEntry.command) {
+    return null;
+  }
+  return rawCommand === workEntry.command.trim() ? null : rawCommand;
+}
+
+export function buildToolCallExpandedBody(
+  workEntry: Pick<
+    WorkLogEntry,
+    "changedFiles" | "command" | "detail" | "itemType" | "rawCommand" | "toolData"
+  >,
+  workspaceRoot: string | undefined,
+): string | null {
+  const blocks: string[] = [];
+  const appendUniqueBlock = (value: string | null | undefined) => {
+    const trimmed = value?.trim();
+    if (trimmed && !blocks.includes(trimmed)) {
+      blocks.push(trimmed);
+    }
+  };
+
+  if (workEntry.itemType === "mcp_tool_call" && workEntry.toolData !== undefined) {
+    appendUniqueBlock(`MCP call\n${JSON.stringify(workEntry.toolData, null, 2)}`);
+  }
+  appendUniqueBlock(workEntryRawCommand(workEntry) ?? workEntry.command);
+  appendUniqueBlock(workEntry.detail);
+  if ((workEntry.changedFiles?.length ?? 0) > 0) {
+    appendUniqueBlock(
+      workEntry
+        .changedFiles!.map((filePath) => formatWorkspaceRelativePath(filePath, workspaceRoot))
+        .join("\n"),
+    );
+  }
+
+  return blocks.length > 0 ? blocks.join("\n\n") : null;
+}
+
 export function workEntryIsVisibleInGroup(
   entry: WorkLogEntry,
   expandedToolGroupEntry = false,

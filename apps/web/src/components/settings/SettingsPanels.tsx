@@ -2318,6 +2318,32 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          {...searchableSetting("proactive-panels")}
+          description="Automatically open the linked pull request when it appears and the turn diff when agent work finishes."
+          resetAction={
+            settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled ? (
+              <SettingResetButton
+                label="proactive panels"
+                onClick={() =>
+                  updateSettings({
+                    proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.proactivePanelsEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ proactivePanelsEnabled: Boolean(checked) })
+              }
+              aria-label="Proactive panels"
+            />
+          }
+        />
+
+        <SettingsRow
           {...searchableSetting("skills-in-slash-menu")}
           description="Also include skills in the / command menu. Skills always appear when you type $."
           resetAction={

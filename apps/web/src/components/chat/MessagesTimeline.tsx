@@ -134,6 +134,7 @@ import {
 } from "./AssistantCitationSource";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
 import {
+  buildToolCallExpandedBody,
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRowsWithState,
   type MessagesTimelineRowsProjection,
@@ -153,6 +154,7 @@ import {
   toolGroupAction,
   workEntryDisplayLabel,
   workEntryIsVisibleInGroup,
+  workEntryRawCommand,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,

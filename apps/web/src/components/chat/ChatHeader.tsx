@@ -11,6 +11,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import type { ChangeRequestSettleSource } from "@t3tools/client-runtime/state/thread-settled";
 import { ChevronDownIcon } from "lucide-react";
 import {
   memo,
@@ -44,14 +45,17 @@ import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
 import { readLocalApi } from "~/localApi";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { observeResponsiveBreakpointFade, usePanelAnimationSettings } from "../../panelAnimations";
 import { ProjectFavicon } from "../ProjectFavicon";
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
   WorkspaceBreadcrumbSeparator,
 } from "../WorkspaceBreadcrumb";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
+import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
+import { ChatHeaderMobileMenuToggle, ChatHeaderSidebarToggle } from "./ChatHeaderMobileMenu";
+import { shouldRenderChatHeaderInlineActions } from "./chatHeaderMobileMenu";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -103,8 +107,6 @@ export function resolveRenameCommit(input: {
 // events (the second click dismisses it and dblclick still fires), so it
 // opens immediately.
 const TITLE_MENU_OPEN_DELAY_MS = 500;
-// Matches the @3xl/header-actions container breakpoint owned by this header.
-const HEADER_ACTIONS_EXPANDED_BREAKPOINT_REM = 48;
 
 export function shouldShowOpenInPicker(input: {
   readonly activeProjectName: string | undefined;
@@ -287,6 +289,9 @@ export const ChatHeader = memo(function ChatHeader({
     },
     [cancelPendingTitleMenu, closeMenu, startRename],
   );
+  useEffect(() => {
+    setMobileMenuExpanded(false);
+  }, [activeThreadId]);
   const handleHeaderContextMenu = useCallback(
     (event: ReactMouseEvent) => {
       if (renamingTitle !== null) return;

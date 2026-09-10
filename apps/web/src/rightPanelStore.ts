@@ -125,6 +125,8 @@ interface RightPanelStoreState {
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
   openAttachment: (ref: ScopedThreadRef, attachment: ChatFileAttachment) => void;
+  /** Focus the files explorer tree on a directory picked from a breadcrumb menu. */
+  navigateFromFileBreadcrumb: (ref: ScopedThreadRef, crumb: FileBreadcrumb) => void;
   openPullRequest: (
     ref: ScopedThreadRef,
     target: {
@@ -489,6 +491,12 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               : next;
           }),
         ),
+      navigateFromFileBreadcrumb: (ref, crumb) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            applyFileBreadcrumbNavigation(current, crumb),
+          ),
+        })),
       openFile: (ref, relativePath, line) =>
         set((state) =>
           userAction(state, scopedThreadKey(ref), (current) => {

@@ -36,6 +36,8 @@ interface FileBrowserPanelProps {
   selectedPathRevealId: number;
   onOpenFile: (relativePath: string) => void;
   onRefreshSelectedFile?: () => void;
+  /** Directory path to reveal in the tree when the Files surface is focused in-place. */
+  focusPath?: string | null;
   workspaceMutationId: string | null;
 }
 
@@ -100,6 +102,7 @@ export default function FileBrowserPanel({
   selectedPathRevealId,
   onOpenFile,
   onRefreshSelectedFile,
+  focusPath = null,
   workspaceMutationId,
 }: FileBrowserPanelProps) {
   const { resolvedTheme } = useTheme();
