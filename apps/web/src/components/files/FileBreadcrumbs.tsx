@@ -74,6 +74,8 @@ function BreadcrumbMenuContent(props: {
   readonly directoryPath: string;
   readonly environmentId: EnvironmentId;
   readonly onDirectoryChange: (path: string) => void;
+  /** Optional: focuses the Files explorer tree on a directory chosen from a breadcrumb menu. */
+  readonly onDirectoryFocus?: ((path: string) => void) | undefined;
   readonly onOpenChange: (open: boolean) => void;
   readonly onOpenFile: (path: string) => void;
   readonly projectName: string;
@@ -240,6 +242,7 @@ function DirectoryBreadcrumb(props: FileBreadcrumbsProps & { readonly crumb: Fil
           directoryPath={directoryPath}
           environmentId={props.environmentId}
           onDirectoryChange={setDirectoryPath}
+          onDirectoryFocus={props.onDirectoryFocus}
           onOpenChange={handleOpenChange}
           onOpenFile={props.onOpenFile}
           projectName={props.projectName}

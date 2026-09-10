@@ -39,6 +39,7 @@ it.layer(NodeServices.layer)("ClaudeLiveQuota", (it) => {
       const credentialsPath = path.join(dir, ".credentials.json");
       yield* fileSystem.writeFileString(
         credentialsPath,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
         JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat-abc123" } }),
       );
 

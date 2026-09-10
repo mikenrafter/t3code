@@ -1052,11 +1052,6 @@ export function createServerEnvironmentAtoms<R, E>(
     // limit API (distinct from the historical transcript-scan usage above),
     // server-cached for 120s (see LiveQuotaService's TTL) — matching that
     // window here avoids a client refetch landing on the same cached value.
-    liveQuota: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:server:live-quota",
-      tag: WS_METHODS.serverGetLiveQuota,
-      staleTimeMs: 60_000,
-    }),
     // Live quota is a point-in-time read of a provider's own dashboard/rate
     // limit API (distinct from the historical transcript-scan usage above),
     // server-cached for 120s (see LiveQuotaService's TTL) — matching that

@@ -195,7 +195,17 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       }
       yield* adapter.stopSession(threadId);
       const runtimeEvents = yield* Fiber.join(runtimeEventsFiber);
-      assert.isFalse(runtimeEvents.some((event) => event.type === "turn.completed"));
+      // A turn that already started must still close itself out as failed so
+      // the UI never waits on a dead turn.
+      const turnCompleted = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.isDefined(turnCompleted);
+      if (turnCompleted?.type === "turn.completed") {
+        assert.equal(turnCompleted.payload.state, "failed");
+        assert.include(
+          turnCompleted.payload.errorMessage,
+          "Cursor reported a transport failure.",
+        );
+      }
     }),
   );
 

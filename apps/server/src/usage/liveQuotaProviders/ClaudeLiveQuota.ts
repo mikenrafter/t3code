@@ -102,6 +102,19 @@ const stringOrNull = (value: unknown): string | null =>
   typeof value === "string" && value.length > 0 ? value : null;
 
 const formatPercent = (value: number): string => `${Math.round(value * 100) / 100}%`;
+// Typed helpers keep the literal `provider`/`status` fields from widening to
+// string inside Effect.succeed/generator returns.
+const missingResult = (): LiveQuotaResult => ({
+  provider: "claude",
+  status: "missing",
+  accountEmail: null,
+});
+const failedResult = (message: string): LiveQuotaResult => ({
+  provider: "claude",
+  status: "failed",
+  accountEmail: null,
+  message,
+});
 
 const formatResetDescription = (resetsAtIso: string | null, nowMs: number): string => {
   if (resetsAtIso === null) return "No active window";
@@ -228,12 +241,7 @@ export const make: Effect.Effect<
 
       const settings = yield* Effect.result(settingsService.getSettings);
       const result: LiveQuotaResult = yield* Result.isFailure(settings)
-        ? Effect.succeed({
-            provider: "claude",
-            status: "failed",
-            accountEmail: null,
-            message: "Server settings could not be read.",
-          })
+        ? Effect.succeed(failedResult("Server settings could not be read."))
         : Effect.gen(function* () {
             const claudeHome = yield* resolveClaudeHomePath(settings.success.providers.claudeAgent);
             const credentialsPath = yield* resolveClaudeCredentialsPath(claudeHome);
@@ -241,7 +249,7 @@ export const make: Effect.Effect<
 
             const credentials = yield* readClaudeAccessToken(credentialsPath);
             if (credentials.status === "missing") {
-              return { provider: "claude", status: "missing", accountEmail: null };
+              return missingResult();
             }
 
             const email = yield* readClaudeAccountEmail(accountConfigPath);

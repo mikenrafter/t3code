@@ -81,6 +81,12 @@ const failedResult = (message: string, email: string | null = null): LiveQuotaRe
   accountEmail: email,
   message,
 });
+const okResult = (email: string | null, snapshot: LiveQuotaSnapshot): LiveQuotaResult => ({
+  provider: "openai",
+  status: "ok",
+  accountEmail: email,
+  snapshot,
+});
 
 interface CacheEntry {
   readonly fetchedAtMs: number;
@@ -122,12 +128,7 @@ export const make: Effect.Effect<
             }
             const account = response.success.account.account;
             const email = account?.type === "chatgpt" ? account.email : null;
-            return {
-              provider: "openai",
-              status: "ok",
-              accountEmail: email,
-              snapshot: buildOpenAiSnapshot(response.success.rateLimits, email, nowMs),
-            };
+            return okResult(email, buildOpenAiSnapshot(response.success.rateLimits, email, nowMs));
           }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
       yield* Ref.set(cacheRef, { fetchedAtMs: nowMs, result });

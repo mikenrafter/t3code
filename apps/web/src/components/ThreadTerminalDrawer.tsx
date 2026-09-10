@@ -100,7 +100,6 @@ import {
 const MULTI_CLICK_SELECTION_ACTION_DELAY_MS = 260;
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
-const MULTI_CLICK_SELECTION_ACTION_DELAY_MS = 260;
 
 function writeSystemMessage(terminal: GhosttyTerminalSurface, message: string): void {
   terminal.write(`\r\n[terminal] ${message}\r\n`);
