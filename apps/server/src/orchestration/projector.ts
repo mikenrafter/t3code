@@ -49,6 +49,9 @@ import {
   ThreadUnarchivedPayload,
   ThreadUnsettledPayload,
   ThreadUnsnoozedPayload,
+  ThreadUsageGuardSettledPayload,
+  ThreadUsageGuardSuppressedPayload,
+  ThreadUsageGuardResumedPayload,
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
@@ -542,6 +545,41 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             snoozedUntil: null,
             snoozedAt: null,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.usage-guard.settled":
+    case "thread.usage-guard.suppressed":
+      return decodeForEvent(
+        event.type === "thread.usage-guard.settled"
+          ? ThreadUsageGuardSettledPayload
+          : ThreadUsageGuardSuppressedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            usageGuard: payload.guard,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.usage-guard.resumed":
+      return decodeForEvent(
+        ThreadUsageGuardResumedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            usageGuard: null,
             updatedAt: payload.updatedAt,
           }),
         })),

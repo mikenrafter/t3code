@@ -45,6 +45,7 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { usageGuardContinuationText } from "./UsageGuardPolicy.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
 
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
@@ -712,6 +713,171 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: alreadyAwake ? thread.updatedAt : occurredAt,
         },
       };
+    }
+
+    case "thread.usage-guard.suppress": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const occurredAt = yield* nowIso;
+      const guard = thread.usageGuard ?? null;
+      // The prompt the user is answering names the window it came from. A
+      // guard for a different window is stale (a reset replaced it, or the
+      // guard settled meanwhile): suppressing then would disable the
+      // thresholds for a window nobody prompted about.
+      if (guard === null || guard.windowId !== command.windowId) {
+        return yield* Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `thread ${command.threadId} has no usage guard for window '${command.windowId}'`,
+          }),
+        );
+      }
+      if (guard.phase === "suppressed") {
+        // Already riding this window out: re-emit with the stored timestamps
+        // so a double-press or raced client is a projection no-op.
+        return {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.usage-guard.suppressed",
+          payload: { threadId: command.threadId, guard, updatedAt: thread.updatedAt },
+        };
+      }
+      const suppressedGuard = {
+        ...guard,
+        phase: "suppressed" as const,
+        suppressUntil: guard.windowResetsAt ?? null,
+        resumeAt: null,
+        scheduledAt: null,
+        updatedAt: occurredAt,
+      };
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.usage-guard.suppressed",
+        payload: { threadId: command.threadId, guard: suppressedGuard, updatedAt: occurredAt },
+      };
+    }
+
+    case "thread.usage-guard.settle": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      // The reactor computed this settle from a snapshot that may predate a
+      // user action (manual stop, another settle, a resume already fired).
+      // Serial command decisions are the authoritative check: a snapshot
+      // sequence older than the read model's means the state moved under the
+      // reactor and the settle is stale.
+      if (command.snapshotSequence < readModel.snapshotSequence) {
+        return yield* Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `thread ${command.threadId} usage-guard settle is stale (command snapshot ${command.snapshotSequence}, read model at ${readModel.snapshotSequence})`,
+          }),
+        );
+      }
+      const alreadySettled = thread.usageGuard?.phase === "paused";
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.usage-guard.settled",
+        payload: {
+          threadId: command.threadId,
+          guard: command.guard,
+          updatedAt: alreadySettled ? thread.updatedAt : command.createdAt,
+        },
+      };
+    }
+
+    case "thread.usage-guard.resume": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const guard = thread.usageGuard ?? null;
+      // Only a paused guard resumes, and only the pause this schedule belongs
+      // to. A stale sweep (thread already resumed, guard replaced by a new
+      // prompt, user resumed manually) is a no-op rather than a surprise turn.
+      if (guard === null || guard.phase !== "paused" || guard.scheduledAt !== command.scheduledAt) {
+        return [];
+      }
+      const occurredAt = command.createdAt;
+      const waitedMs = Math.max(0, Date.parse(occurredAt) - Date.parse(guard.scheduledAt));
+      const resumeMessageId = MessageId.make(`usage-guard-resume:${command.commandId}`);
+      const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId: resumeMessageId,
+          role: "user",
+          text: usageGuardContinuationText({ guard, waitedMs, now: occurredAt }),
+          attachments: [],
+          turnId: null,
+          streaming: false,
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        },
+      };
+      const resumedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        causationEventId: userMessageEvent.eventId,
+        type: "thread.usage-guard.resumed",
+        payload: {
+          threadId: command.threadId,
+          scheduledAt: command.scheduledAt,
+          waitedMs,
+          updatedAt: occurredAt,
+        },
+      };
+      const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        causationEventId: userMessageEvent.eventId,
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: resumeMessageId,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          createdAt: occurredAt,
+        },
+      };
+      // Order matters: the resumed event clears the guard record before the
+      // turn-start so a guard evaluation racing the resumed turn never sees
+      // the stale paused record.
+      return [resumedEvent, userMessageEvent, turnStartRequestedEvent];
     }
 
     case "thread.pin": {

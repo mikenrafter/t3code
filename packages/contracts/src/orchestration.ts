@@ -559,6 +559,45 @@ export const OrchestrationSession = Schema.Struct({
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;
 
+/**
+ * The usage-window guard's state for a thread, mirrored from the provider
+ * windows (#9507) that the server already tracks per instance. One guard
+ * record per thread; a new window replaces the previous one outright.
+ *
+ * - `"prompted"` — crossed the 90% prompt threshold once this window and is
+ *   waiting on the user's wait-or-compact decision. Dismissing the prompt is
+ *   local-only; only the explicit keep-going press moves the server state.
+ * - `"paused"` — stopped at the 95% threshold (or by a provider limit error),
+ *   compacted, and waiting for the window reset. `resumeAt` is the scheduled
+ *   auto-resume, capped 5h out; `null` means do not auto-resume (a weekly
+ *   window, or no reset time to schedule from).
+ * - `"suppressed"` — the user chose "don't compact, keep going": both
+ *   thresholds are disabled for this thread until `suppressUntil` (the
+ *   window's reset), letting an unlimited plan keep running.
+ *
+ * Optional on threads so payloads from pre-guard servers still decode.
+ */
+export const OrchestrationUsageGuard = Schema.Struct({
+  windowId: TrimmedNonEmptyString,
+  windowKind: Schema.Literals(["session", "weekly", "monthly", "other"]),
+  usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  /**
+   * The tracked window's reset time, when the provider reports one. The
+   * window period is (`windowId`, `windowResetsAt`): ids persist across
+   * resets, so the pair is what distinguishes a fresh window from the one a
+   * prompt or suppression already answered.
+   */
+  windowResetsAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  phase: Schema.Literals(["prompted", "paused", "suppressed"]),
+  resumeAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  scheduledAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  suppressUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
+  reason: Schema.Literals(["threshold", "provider_error"]),
+  summary: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  updatedAt: IsoDateTime,
+});
+export type OrchestrationUsageGuard = typeof OrchestrationUsageGuard.Type;
+
 export const OrchestrationCheckpointFile = Schema.Struct({
   path: TrimmedNonEmptyString,
   kind: TrimmedNonEmptyString,
@@ -763,6 +802,9 @@ export const OrchestrationThread = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  // The usage-window guard's state (see OrchestrationUsageGuard). Cleared when
+  // the guard resumes the thread or the window resets with no stop in between.
+  usageGuard: Schema.optional(Schema.NullOr(OrchestrationUsageGuard)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -856,6 +898,8 @@ export const OrchestrationThreadShell = Schema.Struct({
       }),
     ),
   ),
+  // See OrchestrationThread.usageGuard. Optional so old servers/clients interop.
+  usageGuard: Schema.optional(Schema.NullOr(OrchestrationUsageGuard)),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
@@ -1110,6 +1154,41 @@ const ThreadUnsnoozeCommand = Schema.Struct({
   reason: Schema.Literal("user"),
 });
 
+// The "don't compact, keep going" answer to the guard's 90% prompt. The
+// decider checks the window matches the thread's guard record, so a prompt
+// from an already-replaced window cannot suppress the current one. The
+// "wait" answer is a local dismissal and dispatches nothing.
+const ThreadUsageGuardSuppressCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-guard.suppress"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  windowId: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
+const ThreadUsageGuardSettleCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-guard.settle"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  guard: OrchestrationUsageGuard,
+  // Set when a provider turn was running when the guard stopped the thread;
+  // the reactor interrupts it before compacting. Snapshot-guarded so a settle
+  // that lost the race against a user interrupt still skips the compaction.
+  snapshotSequence: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+
+// Fires the guard's scheduled resume: clears the guard record and starts the
+// continuation turn whose user message tells the model how long the thread
+// waited and asks it to judge whether its work is still relevant.
+const ThreadUsageGuardResumeCommand = Schema.Struct({
+  type: Schema.Literal("thread.usage-guard.resume"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  scheduledAt: IsoDateTime,
+  createdAt: IsoDateTime,
+});
+
 const ThreadPinCommand = Schema.Struct({
   type: Schema.Literal("thread.pin"),
   commandId: CommandId,
@@ -1348,6 +1427,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUserInputDismissCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadUsageGuardSuppressCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -1380,6 +1460,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputDismissCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  ThreadUsageGuardSuppressCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1511,6 +1592,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadTitleRegenerationCompleteCommand,
   ThreadPullRequestSyncCommand,
   ThreadPullRequestLinkSyncCommand,
+  ThreadUsageGuardSettleCommand,
+  ThreadUsageGuardResumeCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1532,6 +1615,9 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.unsettled",
   "thread.snoozed",
   "thread.unsnoozed",
+  "thread.usage-guard.settled",
+  "thread.usage-guard.suppressed",
+  "thread.usage-guard.resumed",
   "thread.pinned",
   "thread.unpinned",
   "thread.pin-reordered",
@@ -1650,6 +1736,28 @@ export const ThreadUnsnoozedPayload = Schema.Struct({
   // thread.unsettled's activity resets. Timer wakes emit no event: clients
   // derive them from snoozedUntil passing.
   reason: Schema.Literals(["user", "activity"]),
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadUsageGuardSettledPayload = Schema.Struct({
+  threadId: ThreadId,
+  guard: OrchestrationUsageGuard,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadUsageGuardSuppressedPayload = Schema.Struct({
+  threadId: ThreadId,
+  guard: OrchestrationUsageGuard,
+  updatedAt: IsoDateTime,
+});
+
+// The guard started the continuation turn. The user message it dispatched
+// arrives as its own thread.message-sent event; clients needing the wait
+// duration read it from the guard's scheduledAt and this payload's time.
+export const ThreadUsageGuardResumedPayload = Schema.Struct({
+  threadId: ThreadId,
+  scheduledAt: IsoDateTime,
+  waitedMs: NonNegativeInt,
   updatedAt: IsoDateTime,
 });
 
@@ -1911,6 +2019,21 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.unsnoozed"),
     payload: ThreadUnsnoozedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.usage-guard.settled"),
+    payload: ThreadUsageGuardSettledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.usage-guard.suppressed"),
+    payload: ThreadUsageGuardSuppressedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.usage-guard.resumed"),
+    payload: ThreadUsageGuardResumedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
