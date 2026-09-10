@@ -620,11 +620,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const adapter = yield* OpenCodeAdapter;
       const push = makeOpenCodeEventQueue();
       const threadId = asThreadId("task-history");
-      yield* adapter.startSession({
-        provider: ProviderDriverKind.make("opencode"),
-        threadId,
-        runtimeMode: "full-access",
-      });
       const events = yield* adapter.streamEvents.pipe(
         Stream.filter(
           (event) =>
@@ -636,6 +631,11 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         Stream.runCollect,
         Effect.forkChild,
       );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
       const part = {
         id: "task-part",
         messageID: "parent-message",
@@ -708,11 +708,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         const adapter = yield* OpenCodeAdapter;
         const push = makeOpenCodeEventQueue();
         const threadId = asThreadId("background-history");
-        yield* adapter.startSession({
-          provider: ProviderDriverKind.make("opencode"),
-          threadId,
-          runtimeMode: "full-access",
-        });
         const events = yield* adapter.streamEvents.pipe(
           Stream.filter(
             (event) => event.type === "task.started" || event.type === "task.completed",
@@ -721,6 +716,11 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           Stream.runCollect,
           Effect.forkChild,
         );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
         push({
           type: "message.part.updated",
           properties: {
@@ -765,7 +765,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
               ? "stopped"
               : "completed",
         );
-        yield* adapter.stopSession(threadId);
+          yield* adapter.stopSession(threadId);
       }),
     );
   }
