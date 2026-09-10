@@ -5,6 +5,8 @@ import {
   contextWindowReachedThreadLimit,
   deriveLatestContextWindowSnapshot,
   formatContextWindowTokens,
+  formatThreadCacheNotice,
+  threadCacheFreshness,
 } from "./contextWindow";
 
 function makeActivity(
@@ -136,5 +138,71 @@ describe("contextWindow", () => {
 
     expect(contextWindowReachedThreadLimit(snapshot)).toBe(true);
     expect(contextWindowReachedThreadLimit(snapshot, 300_000)).toBe(false);
+  });
+
+  describe("threadCacheFreshness", () => {
+    const updatedAt = "2026-03-23T00:00:00.000Z";
+    const snapshot = { usedTokens: 14_000, updatedAt };
+
+    it("reports cache life remaining inside the TTL", () => {
+      expect(threadCacheFreshness(snapshot, Date.parse(updatedAt) + 2 * 60_000)).toEqual({
+        cached: true,
+        minutesRemaining: 3,
+        uncachedTokens: 14_000,
+      });
+    });
+
+    it("reports uncached once the TTL lapses", () => {
+      expect(threadCacheFreshness(snapshot, Date.parse(updatedAt) + 5 * 60_000)).toEqual({
+        cached: false,
+        minutesRemaining: 0,
+        uncachedTokens: 14_000,
+      });
+    });
+
+    it("hides the notice for the last seconds of cache life", () => {
+      expect(
+        threadCacheFreshness(snapshot, Date.parse(updatedAt) + 4 * 60_000 + 30_000),
+      ).toBeNull();
+    });
+
+    it("reads a client clock behind the server as freshly cached", () => {
+      expect(threadCacheFreshness(snapshot, Date.parse(updatedAt) - 60_000)).toEqual({
+        cached: true,
+        minutesRemaining: 5,
+        uncachedTokens: 14_000,
+      });
+    });
+
+    it("skips threads without usage", () => {
+      expect(threadCacheFreshness(null, Date.parse(updatedAt))).toBeNull();
+      expect(threadCacheFreshness({ usedTokens: 0, updatedAt }, Date.parse(updatedAt))).toBeNull();
+    });
+  });
+
+  describe("formatThreadCacheNotice", () => {
+    it("formats the cached copy", () => {
+      expect(
+        formatThreadCacheNotice({ cached: true, minutesRemaining: 3, uncachedTokens: 14_000 }),
+      ).toBe("This thread is cached for the next 3 minutes.");
+      expect(
+        formatThreadCacheNotice({ cached: true, minutesRemaining: 1, uncachedTokens: 14_000 }),
+      ).toBe("This thread is cached for the next 1 minute.");
+    });
+
+    it("formats the uncached copy with the token count", () => {
+      expect(
+        formatThreadCacheNotice({ cached: false, minutesRemaining: 0, uncachedTokens: 82_000 }),
+      ).toBe("This thread is uncached at 82k tokens.");
+    });
+
+    it("suggests a new thread above 100k uncached tokens", () => {
+      expect(
+        formatThreadCacheNotice({ cached: false, minutesRemaining: 0, uncachedTokens: 100_001 }),
+      ).toBe("This thread is uncached at 100k tokens. Consider starting a new thread.");
+      expect(
+        formatThreadCacheNotice({ cached: false, minutesRemaining: 0, uncachedTokens: 100_000 }),
+      ).toBe("This thread is uncached at 100k tokens.");
+    });
   });
 });

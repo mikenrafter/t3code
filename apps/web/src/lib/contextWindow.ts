@@ -126,3 +126,52 @@ export function contextWindowReachedThreadLimit(
 ): boolean {
   return snapshot !== null && snapshot.usedTokens >= tokenLimit;
 }
+
+export const THREAD_CACHE_TTL_MS = 5 * 60_000;
+const CACHE_NEW_THREAD_TOKENS = 100_000;
+
+export type ThreadCacheFreshness = {
+  /** False once the snapshot is older than the prompt-cache TTL. */
+  readonly cached: boolean;
+  /** Whole minutes of cache life left; only meaningful while cached. */
+  readonly minutesRemaining: number;
+  readonly uncachedTokens: number;
+};
+
+/**
+ * Prompt-cache freshness from the usage snapshot alone. The provider refreshes
+ * its prompt cache on every model request, so the latest snapshot's age is the
+ * cache's age; past Claude's 5-minute TTL the next turn re-reads the whole
+ * context. Only the providers whose caches we can see (Claude, Codex) feed this.
+ */
+export function threadCacheFreshness(
+  snapshot: Pick<ContextWindowSnapshot, "usedTokens" | "updatedAt"> | null,
+  nowMs: number,
+): ThreadCacheFreshness | null {
+  if (snapshot === null || snapshot.usedTokens <= 0) return null;
+  const updatedAtMs = Date.parse(snapshot.updatedAt);
+  if (!Number.isFinite(updatedAtMs)) return null;
+  // A client clock behind the server's reads as a just-refreshed cache, never
+  // as negative cache life.
+  const elapsedMs = Math.max(0, nowMs - updatedAtMs);
+  if (elapsedMs >= THREAD_CACHE_TTL_MS) {
+    return { cached: false, minutesRemaining: 0, uncachedTokens: snapshot.usedTokens };
+  }
+  const minutesRemaining = Math.floor((THREAD_CACHE_TTL_MS - elapsedMs) / 60_000);
+  // Under a minute of life left is not worth a notice; the uncached copy takes
+  // over when the TTL lapses.
+  if (minutesRemaining < 1) return null;
+  return { cached: true, minutesRemaining, uncachedTokens: snapshot.usedTokens };
+}
+
+export function formatThreadCacheNotice(freshness: ThreadCacheFreshness): string {
+  if (freshness.cached) {
+    return `This thread is cached for the next ${freshness.minutesRemaining} ${
+      freshness.minutesRemaining === 1 ? "minute" : "minutes"
+    }.`;
+  }
+  const notice = `This thread is uncached at ${formatContextWindowTokens(freshness.uncachedTokens)} tokens.`;
+  return freshness.uncachedTokens > CACHE_NEW_THREAD_TOKENS
+    ? `${notice} Consider starting a new thread.`
+    : notice;
+}

@@ -237,6 +237,7 @@ import {
   PaperclipIcon,
   PauseIcon,
   WifiOffIcon,
+  ZapIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -381,7 +382,12 @@ import {
   hasDismissedResumeCompaction,
   shouldOfferResumeCompaction,
 } from "./chat/ContextWindowMeter.logic";
-import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
+import {
+  deriveLatestContextWindowSnapshot,
+  formatContextWindowTokens,
+  formatThreadCacheNotice,
+  threadCacheFreshness,
+} from "../lib/contextWindow";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_DURATION_MS,
@@ -6105,6 +6111,51 @@ export default function ChatView(props: ChatViewProps) {
     usageLimitPreset,
     usageLimitResetsAt,
   ]);
+  // Prompt-cache freshness for the providers whose caches we can see (Claude,
+  // Codex). Shares the banner slot with the usage-limit notice, which wins.
+  // Session-scoped dismissals keyed per (thread, snapshot), so the next usage
+  // snapshot gets a fresh notice.
+  const [dismissedCacheNoticeKeys, setDismissedCacheNoticeKeys] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const cacheNoticeKey =
+    activeThread && activeContextWindow
+      ? `${activeThread.id}:${activeContextWindow.updatedAt}`
+      : null;
+  const cacheNoticeBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (
+      activeThread === null ||
+      activeContextWindow === null ||
+      cacheNoticeKey === null ||
+      dismissedCacheNoticeKeys.has(cacheNoticeKey) ||
+      phase === "running" ||
+      pendingUserInputs.length > 0 ||
+      (selectedProvider !== "claudeAgent" && selectedProvider !== "codex")
+    ) {
+      return null;
+    }
+    const freshness = threadCacheFreshness(activeContextWindow, nowMinuteDate.getTime());
+    if (freshness === null) {
+      return null;
+    }
+    return {
+      id: `cache-freshness:${cacheNoticeKey}`,
+      variant: "info",
+      icon: <ZapIcon />,
+      title: formatThreadCacheNotice(freshness),
+      dismissLabel: "Dismiss cache status notice",
+      onDismiss: () => setDismissedCacheNoticeKeys((keys) => new Set(keys).add(cacheNoticeKey)),
+    };
+  }, [
+    activeContextWindow,
+    activeThread,
+    cacheNoticeKey,
+    dismissedCacheNoticeKeys,
+    nowMinuteDate,
+    pendingUserInputs.length,
+    phase,
+    selectedProvider,
+  ]);
   // Session-scoped dismissals, one key per (thread, snapshot). A set rather
   // than a single slot so dismissing the banner on one thread does not
   // resurface it on another thread dismissed earlier.
@@ -6412,6 +6463,11 @@ export default function ChatView(props: ChatViewProps) {
     // The user asked for this one, so it leads the notice tier instead of trailing it.
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const usageLimitItems = usageLimitBannerItem === null ? [] : [usageLimitBannerItem];
+    // One banner at a time in the limit/cache slot; the limit notice wins.
+    const cacheNoticeItems =
+      usageLimitBannerItem === null && cacheNoticeBannerItem !== null
+        ? [cacheNoticeBannerItem]
+        : [];
     const usageGuardPromptItems =
       usageGuardPromptBannerItem === null ? [] : [usageGuardPromptBannerItem];
     const usageGuardPausedItems =
@@ -6424,6 +6480,7 @@ export default function ChatView(props: ChatViewProps) {
         ...systemComposerBannerItems,
         ...backgroundLivenessItems,
         ...usageLimitItems,
+        ...cacheNoticeItems,
         ...usageGuardPromptItems,
         ...usageGuardPausedItems,
         ...resumeCompactionItems,
@@ -6438,6 +6495,7 @@ export default function ChatView(props: ChatViewProps) {
       ...systemComposerBannerItems,
       ...backgroundLivenessItems,
       ...usageLimitItems,
+      ...cacheNoticeItems,
       ...usageGuardPromptItems,
       ...usageGuardPausedItems,
       ...resumeCompactionItems,
@@ -6485,6 +6543,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    cacheNoticeBannerItem,
     contextLimitBannerItem,
     feedbackBannerItems,
     handleRestoreThreadBranch,
