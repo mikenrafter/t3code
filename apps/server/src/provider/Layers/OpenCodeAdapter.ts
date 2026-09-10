@@ -2341,6 +2341,24 @@ export function makeOpenCodeAdapter(
 
       switch (event.type) {
         case "session.updated": {
+          // `time.compacting` is the timestamp OpenCode stamps on the session
+          // while it rewrites its own context; its absence clears it. Raise
+          // the dedicated busy state so clients say Compacting; every other
+          // lifecycle event drops the detail by omission.
+          const compactingSince = event.properties.info.time?.compacting;
+          if (compactingSince !== undefined) {
+            yield* emit({
+              ...(yield* buildEventBase({
+                threadId: context.session.threadId,
+                raw: event,
+              })),
+              type: "session.state.changed",
+              payload: {
+                state: "compacting",
+                reason: "opencode:session.time.compacting",
+              },
+            });
+          }
           const title = openCodeEventSessionTitle(event);
           if (title) {
             yield* emit({

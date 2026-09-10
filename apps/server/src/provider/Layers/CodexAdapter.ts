@@ -1664,6 +1664,20 @@ function mapToRuntimeEvents(
 
   if (event.method === "item/started") {
     const started = mapItemLifecycle(event, canonicalThreadId, "item.started");
+    // A context_compaction item is Codex compacting its own context; raise the
+    // dedicated state so clients say Compacting instead of a generic working
+    // label. The item's completion and every later lifecycle event clear it.
+    const payload = readPayload(EffectCodexSchema.V2ItemStartedNotification, event.payload);
+    if (started && toCanonicalItemType(payload?.item.type) === "context_compaction") {
+      return [
+        started,
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          type: "session.state.changed",
+          payload: { state: "compacting", reason: "codex:context-compaction" },
+        },
+      ];
+    }
     return started ? [started] : [];
   }
 
