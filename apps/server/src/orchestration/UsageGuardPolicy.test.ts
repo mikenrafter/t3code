@@ -11,6 +11,7 @@ import {
   resolveGuardResumeAt,
   sameGuardPeriod,
   usageGuardContinuationText,
+  usageGuardForErrorStop,
 } from "./UsageGuardPolicy.ts";
 
 const NOW_MS = Date.parse("2026-09-10T12:00:00.000Z");
@@ -217,6 +218,34 @@ describe("resolveGuardResumeAt", () => {
       }),
     ).toBeNull();
     expect(resolveGuardResumeAt({ window: { kind: "monthly" }, nowMs: NOW_MS })).toBeNull();
+  });
+});
+
+describe("usageGuardForErrorStop", () => {
+  it("pauses on the synthetic error window with a 5h-capped resume", () => {
+    const guardRecord = usageGuardForErrorStop({ errorMessage: null, nowMs: NOW_MS });
+    expect(guardRecord.windowId).toBe("provider_error");
+    expect(guardRecord.phase).toBe("paused");
+    expect(guardRecord.reason).toBe("provider_error");
+    expect(guardRecord.resumeAt).toBe(
+      DateTime.formatIso(DateTime.makeUnsafe(NOW_MS + USAGE_GUARD_MAX_RESUME_MS)),
+    );
+    expect(guardRecord.scheduledAt).toBe(DateTime.formatIso(DateTime.makeUnsafe(NOW_MS)));
+  });
+
+  it("carries the provider's error message as the continuation cause", () => {
+    const guardRecord = usageGuardForErrorStop({
+      errorMessage: "You've hit your usage limit",
+      nowMs: NOW_MS,
+    });
+    expect(guardRecord.summary).toBe("You've hit your usage limit");
+    expect(
+      usageGuardContinuationText({
+        guard: guardRecord,
+        waitedMs: 60_000,
+        now: "2026-09-10T17:00:00.000Z",
+      }),
+    ).toContain("You've hit your usage limit");
   });
 });
 

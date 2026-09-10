@@ -20,7 +20,11 @@ import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceR
 import { forkParked } from "../serverActivation.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts";
-import { evaluateUsageGuard, resolveGuardResumeAt } from "./UsageGuardPolicy.ts";
+import {
+  evaluateUsageGuard,
+  resolveGuardResumeAt,
+  usageGuardForErrorStop,
+} from "./UsageGuardPolicy.ts";
 
 export class UsageGuardReactor extends Context.Service<
   UsageGuardReactor,
@@ -33,6 +37,7 @@ export class UsageGuardReactor extends Context.Service<
 type GuardWork =
   | { readonly kind: "evaluate"; readonly threadId: ThreadId }
   | { readonly kind: "compact"; readonly threadId: ThreadId }
+  | { readonly kind: "limit-stop"; readonly threadId: ThreadId }
   | { readonly kind: "sweep" };
 
 /**
@@ -186,6 +191,36 @@ export const make = Effect.gen(function* () {
     compactedAt.set(threadId, guard.scheduledAt);
   });
 
+  const limitStopThread = Effect.fn("UsageGuardReactor.limitStopThread")(function* (
+    threadId: ThreadId,
+  ) {
+    // The reactive path (#10550): a turn died on the provider's usage limit.
+    // No window data backs this pause — the guard keys off the synthetic
+    // error window and the pause's schedule.
+    const snapshot = yield* snapshots.getShellSnapshot();
+    const shell = snapshot.threads.find((entry) => entry.id === threadId);
+    if (shell === undefined || shell.archivedAt !== null) return;
+    if (shell.usageGuard?.phase === "paused") return;
+    // A session already running again is a newer turn than the stop; it wins
+    // over settling the thread.
+    const status = shell.session?.status;
+    if (status === "running" || status === "starting") return;
+    const nowMs = Date.parse(DateTime.formatIso(yield* DateTime.now));
+    const now = DateTime.formatIso(DateTime.makeUnsafe(nowMs));
+    const uuid = yield* crypto.randomUUIDv4;
+    yield* engine.dispatch({
+      type: "thread.usage-guard.settle",
+      commandId: CommandId.make(`server:usage-guard-limit:${shell.id}:${uuid}`),
+      threadId: shell.id,
+      guard: usageGuardForErrorStop({
+        errorMessage: shell.session?.lastError ?? null,
+        nowMs,
+      }),
+      snapshotSequence: snapshot.snapshotSequence,
+      createdAt: now,
+    });
+  });
+
   const resumeDueThread = Effect.fn("UsageGuardReactor.resumeDueThread")(function* (
     shell: OrchestrationThreadShell,
   ) {
@@ -211,6 +246,10 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       if (work.kind === "compact") {
         yield* compactPausedThread(work.threadId);
+        return;
+      }
+      if (work.kind === "limit-stop") {
+        yield* limitStopThread(work.threadId);
         return;
       }
       const snapshot = yield* snapshots.getShellSnapshot();
@@ -271,6 +310,13 @@ export const make = Effect.gen(function* () {
         }
         if (event.type === "thread.usage-guard.settled" && event.payload.guard.phase === "paused") {
           return worker.enqueue({ kind: "compact", threadId: event.payload.threadId });
+        }
+        // A stop classed `usage_limit` rides the session-set that records it.
+        if (
+          event.type === "thread.session-set" &&
+          event.payload.session.lastErrorClass === "usage_limit"
+        ) {
+          return worker.enqueue({ kind: "limit-stop", threadId: event.payload.threadId });
         }
         return Effect.void;
       };

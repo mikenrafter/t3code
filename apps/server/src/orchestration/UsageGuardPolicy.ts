@@ -146,6 +146,33 @@ export function resolveGuardResumeAt(input: {
 }
 
 /**
+ * The guard record for a provider stop classed `usage_limit` (#10550): the
+ * providers that publish no usage windows (Cursor, Grok, OpenCode) still
+ * report that a turn died on their limit, and the pause must behave exactly
+ * like a threshold settle — pause now, resume within the 5h cap. With no
+ * window data there is no reset time or percentage; the guard keys its
+ * one-shot behavior on the synthetic window id and the pause's schedule.
+ */
+export function usageGuardForErrorStop(input: {
+  readonly errorMessage: string | null;
+  readonly nowMs: number;
+}): OrchestrationUsageGuard {
+  const now = DateTime.formatIso(DateTime.makeUnsafe(input.nowMs));
+  return {
+    windowId: "provider_error",
+    windowKind: "session",
+    usedPercent: 100,
+    windowResetsAt: null,
+    phase: "paused",
+    resumeAt: resolveGuardResumeAt({ window: { kind: "session" }, nowMs: input.nowMs }),
+    scheduledAt: now,
+    reason: "provider_error",
+    ...(input.errorMessage === null ? {} : { summary: input.errorMessage }),
+    updatedAt: now,
+  };
+}
+
+/**
  * The continuation message the guard's resume turns into the thread's next
  * user message. The model must decide for itself whether the waited-out work
  * is still relevant — and end the turn with the perceived blocker when it
