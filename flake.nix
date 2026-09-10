@@ -50,7 +50,7 @@
                 src = self;
                 pnpmDeps = old.pnpmDeps.override {
                   src = self;
-                  hash = "sha256-EO844JyOlqtUG+mGWOeXlVtQjRpFFgwiXRvTgfEh7ao=";
+                  hash = "sha256-VS3JQu+wbWuVeQaH3+DqtrFU5MY6EUZS+Gv+awcFGAA=";
                 };
               });
         };
