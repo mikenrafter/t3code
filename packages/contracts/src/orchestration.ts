@@ -1742,7 +1742,7 @@ export const OrchestrationGetAgentHistoryResult = Schema.Struct({
 });
 export type OrchestrationGetAgentHistoryResult = typeof OrchestrationGetAgentHistoryResult.Type;
 
-export class OrchestrationGetAgentHistoryError extends Schema.TaggedError<OrchestrationGetAgentHistoryError>()(
+export class OrchestrationGetAgentHistoryError extends Schema.TaggedErrorClass<OrchestrationGetAgentHistoryError>()(
   "OrchestrationGetAgentHistoryError",
   { message: Schema.String },
 ) {}

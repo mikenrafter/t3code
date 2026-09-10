@@ -366,6 +366,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
               }
               for (const event of runtimeMock.state.subscribedEvents) {
                 const resolved = await event;
+                // makeOpenCodeEventQueue resolves its final pending slot with this
+                // sentinel via .close() so the generator returns on its own instead
+                // of relying on interruption, which can't reach a raw Promise await.
+                if (resolved === OPEN_CODE_EVENT_QUEUE_END) return;
                 while (runtimeMock.state.promptEchoEvents.length > 0) {
                   yield runtimeMock.state.promptEchoEvents.shift();
                 }
@@ -487,6 +491,26 @@ function promiseWithResolvers<T>() {
   return { promise, resolve, reject };
 }
 
+// Resolves the queue's dangling final slot so the mock's event.subscribe
+// generator returns on its own. Session teardown interrupts the fiber pulling
+// from that generator, but a raw `await` on a plain Promise can't be
+// interrupted, so without this sentinel `stopSession` would hang forever.
+const OPEN_CODE_EVENT_QUEUE_END = Symbol("openCodeEventQueueEnd");
+
+function makeOpenCodeEventQueue() {
+  let pending = promiseWithResolvers<unknown>();
+  const events = [pending.promise];
+  runtimeMock.state.subscribedEvents = events;
+  const push = (event: unknown) => {
+    const current = pending;
+    pending = promiseWithResolvers<unknown>();
+    events.push(pending.promise);
+    current.resolve(event);
+  };
+  push.close = () => pending.resolve(OPEN_CODE_EVENT_QUEUE_END);
+  return push;
+}
+
 const permissionRequest = (id: string, sessionID: string): PermissionRequest => ({
   id,
   sessionID,
@@ -514,11 +538,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const adapter = yield* OpenCodeAdapter;
       const push = makeOpenCodeEventQueue();
       const threadId = asThreadId("task-history");
-      yield* adapter.startSession({
-        provider: ProviderDriverKind.make("opencode"),
-        threadId,
-        runtimeMode: "full-access",
-      });
       const events = yield* adapter.streamEvents.pipe(
         Stream.filter(
           (event) =>
@@ -530,6 +549,11 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         Stream.runCollect,
         Effect.forkChild,
       );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
       const part = {
         id: "task-part",
         messageID: "parent-message",
@@ -592,6 +616,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           ["ses_child", "completed"],
         ],
       );
+      push.close();
       yield* adapter.stopSession(threadId);
     }),
   );
@@ -602,11 +627,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         const adapter = yield* OpenCodeAdapter;
         const push = makeOpenCodeEventQueue();
         const threadId = asThreadId("background-history");
-        yield* adapter.startSession({
-          provider: ProviderDriverKind.make("opencode"),
-          threadId,
-          runtimeMode: "full-access",
-        });
         const events = yield* adapter.streamEvents.pipe(
           Stream.filter(
             (event) => event.type === "task.started" || event.type === "task.completed",
@@ -615,6 +635,11 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           Stream.runCollect,
           Effect.forkChild,
         );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
         push({
           type: "message.part.updated",
           properties: {
@@ -659,6 +684,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
               ? "stopped"
               : "completed",
         );
+        push.close();
         yield* adapter.stopSession(threadId);
       }),
     );

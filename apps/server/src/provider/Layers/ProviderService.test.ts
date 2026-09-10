@@ -32,6 +32,7 @@ import {
 } from "@t3tools/shared/assistantCitations";
 import { createModelSelection } from "@t3tools/shared/model";
 import { it, assert, describe, vi } from "@effect/vitest";
+import { afterAll } from "vite-plus/test";
 
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -78,6 +79,16 @@ const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTes
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
   Layer.provide(NodeServices.layer),
 );
+
+// startSession verifies the workspace folder exists before dispatching to an
+// adapter, so session cwd fixtures must be real directories.
+const fixtureCwdRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "provider-service-test-"));
+afterAll(() => NodeFS.rmSync(fixtureCwdRoot, { recursive: true, force: true }));
+function fixtureCwd(name: string): string {
+  const dir = NodePath.join(fixtureCwdRoot, name);
+  NodeFS.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
