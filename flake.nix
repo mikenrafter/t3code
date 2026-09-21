@@ -14,7 +14,7 @@
     # every dependency to rebuild from source.
     llm-agents.url = "github:numtide/llm-agents.nix";
 
-    node-dyndrv.url = "path:../node-dyndrv";
+    node-dyndrv.url = "github:mikenrafter/node-dyndrv";
   };
 
   outputs = { self, nixpkgs, flake-utils, llm-agents, node-dyndrv }:

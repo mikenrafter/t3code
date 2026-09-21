@@ -127,11 +127,46 @@
         "type": "github"
       }
     },
+    "nixpkgs_3": {
+      "locked": {
+        "lastModified": 1789749394,
+        "narHash": "sha256-cFTsMQz8Hzn8MT49oaeLSHg62tE86NykugCWkeM2ypk=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "cf9d2fb3e50fa1cd5114c47505ea9177f7ff5f49",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "node-dyndrv": {
+      "inputs": {
+        "nixpkgs": "nixpkgs_3"
+      },
+      "locked": {
+        "lastModified": 1789974287,
+        "narHash": "sha256-BTa19hH+32mcCE5tsScNJ30KkV+w79T1Ey0mFfW0p8E=",
+        "owner": "mikenrafter",
+        "repo": "node-dyndrv",
+        "rev": "c2627ed91e3392db639c871f35b625d94336f22b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mikenrafter",
+        "repo": "node-dyndrv",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
         "llm-agents": "llm-agents",
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": "nixpkgs_2",
+        "node-dyndrv": "node-dyndrv"
       }
     },
     "systems": {
