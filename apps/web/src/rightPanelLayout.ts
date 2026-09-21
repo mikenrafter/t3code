@@ -1,4 +1,3 @@
-export const RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY = "(max-width: 980px)";
 // Applied only while a floating preview overlaps the compact sheet.
 export const RIGHT_PANEL_SHEET_LAYER_CLASS_NAME = "z-[35]";
 export const RIGHT_PANEL_INLINE_LAYOUT_MAX_WIDTH_PX = 980;
