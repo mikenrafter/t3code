@@ -24,8 +24,8 @@
         lib = nixpkgs.lib;
         agents = llm-agents.packages.${system};
 
-        # Electron is unfree; llm-agents' packaging (post 3e108f2a) takes
-        # `electron_43` from its own nixpkgs pin. Import that pin with
+        # Electron is unfree; llm-agents' packaging (post 7890992b) takes
+        # `electron_44` from its own nixpkgs pin. Import that pin with
         # allowUnfree and pass it through so eval does not hit the free-only
         # consumer nixpkgs.
         agentsPkgs = import llm-agents.inputs.nixpkgs {
@@ -65,8 +65,8 @@
         );
         seedSpdxLicenseCache = ''
           mkdir -p .generated/third-party-licenses/spdx/${spdxLicenseListVersion}
-          cp ${spdxLicenseCache}/*.json .generated/third-party-licenses/spdx/${spdxLicenseListVersion}/
           chmod -R u+w .generated
+          cp -f ${spdxLicenseCache}/*.json .generated/third-party-licenses/spdx/${spdxLicenseListVersion}/
         '';
 
         # llm-agents pins the upstream v0.0.33 tarball together with the pnpm
@@ -82,15 +82,14 @@
         t3code = agents.t3code.override {
           t3code-unwrapped =
             (agents.t3code.unwrapped.override {
-              electron_43 = agentsPkgs.electron_43;
+              electron_44 = agentsPkgs.electron_44;
             }).overrideAttrs
               (old: {
                 src = self;
                 pnpmDeps = old.pnpmDeps.override {
                   src = self;
-                  hash = "sha256-YhUUaCJSM9nIkjHCjSOJhmNW4+bYgP2BaS0mQWjLknc=";
+                  hash = "sha256-0YplEpvx75y6NsjS+Re1EWkbbC5x083ZTY6q4F7Tggo=";
                 };
-                preBuild = seedSpdxLicenseCache + old.preBuild;
               });
         };
 
