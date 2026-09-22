@@ -630,6 +630,11 @@ export const OrchestrationSession = Schema.Struct({
 export type OrchestrationSession = typeof OrchestrationSession.Type;
 
 /** A producer-owned temporary presentation overlay for a thread. */
+const ExternalThreadStatusClearEvent = Schema.Union([
+  Schema.Literals(["work", "error", "done"]),
+  Schema.String.check(Schema.isPattern(/^custom:.+$/)),
+]);
+
 export const ExternalThreadStatus = Schema.Struct({
   source: TrimmedNonEmptyString,
   key: TrimmedNonEmptyString,
@@ -638,7 +643,7 @@ export const ExternalThreadStatus = Schema.Struct({
   color: TrimmedNonEmptyString,
   notifyUser: Schema.Boolean,
   expiresAt: Schema.NullOr(IsoDateTime),
-  clearsOn: Schema.NullOr(Schema.Literals(["work", "error", "done"])).pipe(
+  clearsOn: Schema.NullOr(ExternalThreadStatusClearEvent).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   updatedAt: IsoDateTime,

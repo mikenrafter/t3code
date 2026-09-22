@@ -1678,3 +1678,21 @@ it.effect("decodes an expiring external thread status with notification metadata
     assert.strictEqual(status.clearsOn, "work");
   }),
 );
+
+it.effect("decodes producer-defined external status clear events", () =>
+  Effect.gen(function* () {
+    const status = yield* Schema.decodeUnknownEffect(ExternalThreadStatus)({
+      source: "usagewindow",
+      key: "scheduled",
+      text: "Scheduled",
+      icon: "clock",
+      color: "indigo",
+      notifyUser: true,
+      expiresAt: null,
+      clearsOn: "custom:resume-complete",
+      updatedAt: "2026-09-22T11:55:00.000Z",
+    });
+
+    assert.strictEqual(status.clearsOn, "custom:resume-complete");
+  }),
+);
