@@ -1,3 +1,4 @@
+import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import {
   type EnvironmentId,
   type EditorId,
@@ -203,6 +204,7 @@ export const ChatHeader = memo(function ChatHeader({
   if (!actionsCollapsed && actionsOpen) setActionsOpen(false);
   const isMobileLayout = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const [mobileMenuExpanded, setMobileMenuExpanded] = useState(false);
+  const [mobileMenuContainer, setMobileMenuContainer] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     setMobileMenuExpanded(false);
   }, [activeThreadId]);
@@ -572,13 +574,27 @@ export const ChatHeader = memo(function ChatHeader({
       {isMobileLayout && mobileMenuExpanded ? (
         // The row's controls render their menus in portals, so the descendant button sizing only
         // grows their inline triggers to a touch target.
-        <div
-          id="chat-header-mobile-menu"
-          data-chat-header-mobile-menu
-          className="flex w-full shrink-0 flex-wrap items-center justify-end gap-3 border-t border-border/60 py-2.5 [&_button]:h-9 [&_button]:px-3"
-        >
-          {headerActions}
-        </div>
+        <Menu open={mobileMenuExpanded} onOpenChange={setMobileMenuExpanded}>
+          <div
+            ref={setMobileMenuContainer}
+            id="chat-header-mobile-menu"
+            data-chat-header-mobile-menu
+            className="flex w-full shrink-0 flex-wrap items-center justify-end gap-3 border-t border-border/60 py-2.5 [&_button]:h-9 [&_button]:px-3"
+          >
+            {mobileMenuContainer ? (
+              <MenuPrimitive.Portal container={mobileMenuContainer}>
+                <MenuPrimitive.Positioner
+                  render={<div className="contents" />}
+                  style={{ position: "static", inset: "auto", transform: "none" }}
+                >
+                  <MenuPrimitive.Popup render={<div className="contents" />}>
+                    {headerActions}
+                  </MenuPrimitive.Popup>
+                </MenuPrimitive.Positioner>
+              </MenuPrimitive.Portal>
+            ) : null}
+          </div>
+        </Menu>
       ) : null}
     </div>
   );
