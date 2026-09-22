@@ -24,6 +24,7 @@ import {
   OrchestrationSession,
   OrchestrationThread,
   OrchestrationThreadShell,
+  ExternalThreadStatus,
   ProjectCreateCommand,
   OrchestrationMessage,
   ThreadMessageSentPayload,
@@ -1655,5 +1656,23 @@ it.effect("encodes compatible icons inside snapshots and client commands", () =>
     });
     if (command.type !== "project.meta.update") throw new Error("Unexpected command");
     assert.deepEqual(yield* decodeNightlyIcon(command.projectIcon), fallback);
+  }),
+);
+
+it.effect("decodes an expiring external thread status with notification metadata", () =>
+  Effect.gen(function* () {
+    const status = yield* Schema.decodeUnknownEffect(ExternalThreadStatus)({
+      source: "usagewindow",
+      key: "compacting",
+      text: "Compacting",
+      icon: "shrink",
+      color: "amber",
+      notifyUser: true,
+      expiresAt: "2026-09-22T12:00:00.000Z",
+      updatedAt: "2026-09-22T11:55:00.000Z",
+    });
+
+    assert.strictEqual(status.notifyUser, true);
+    assert.strictEqual(status.expiresAt, "2026-09-22T12:00:00.000Z");
   }),
 );

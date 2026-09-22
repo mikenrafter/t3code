@@ -618,6 +618,9 @@ export function projectEvent(
               ...(payload.titleRegeneration !== undefined
                 ? { titleRegeneration: payload.titleRegeneration }
                 : {}),
+              ...(payload.externalStatus !== undefined
+                ? { externalStatus: payload.externalStatus }
+                : {}),
               ...(payload.modelSelection !== undefined
                 ? { modelSelection: payload.modelSelection }
                 : {}),

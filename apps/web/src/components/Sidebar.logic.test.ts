@@ -1999,6 +1999,26 @@ describe("resolveThreadStatusPill", () => {
     ).toMatchObject({ label: "Awaiting Input", pulse: false });
   });
 
+  it("shows an active external status after native input blockers", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          externalStatus: {
+            source: "usagewindow",
+            key: "compacting",
+            text: "Compacting",
+            icon: "shrink",
+            color: "amber",
+            notifyUser: true,
+            expiresAt: "2099-09-22T12:00:00.000Z",
+            updatedAt: "2026-09-22T11:55:00.000Z",
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Compacting", colorClass: expect.stringContaining("amber") });
+  });
+
   it("falls back to working when the thread is actively running without blockers", () => {
     expect(
       resolveThreadStatusPill({

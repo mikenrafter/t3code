@@ -1,8 +1,10 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  CommandId,
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
@@ -27,6 +29,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const orchestrationEngine = yield* OrchestrationEngineService;
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+    const crypto = yield* Crypto.Crypto;
 
     return handlers
       .handle(
@@ -91,6 +94,32 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             snapshot.value,
             args.payload.reasoningMessages === "true",
           );
+        }),
+      )
+      .handle(
+        "threadStatus",
+        Effect.fn("environment.orchestration.threadStatus")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const commandId = CommandId.make(
+            `external-status:${yield* crypto.randomUUIDv4.pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              ),
+            )}`,
+          );
+          return yield* orchestrationEngine
+            .dispatch({
+              type: "thread.meta.update",
+              commandId,
+              threadId: args.params.threadId,
+              externalStatus: args.payload.status,
+            })
+            .pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              ),
+            );
         }),
       )
       .handle(

@@ -508,14 +508,7 @@ export function buildBulkUnpinContextMenuItem(input: {
 }
 
 export interface ThreadStatusPill {
-  label:
-    | "Working"
-    | "Monitoring"
-    | "Connecting"
-    | "Completed"
-    | "Pending Approval"
-    | "Awaiting Input"
-    | "Plan Ready";
+  label: string;
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -524,7 +517,7 @@ export interface ThreadStatusPill {
 // Rollup order mirrors the per-thread resolver exactly: attention states,
 // then active work, then the actionable plan prompt, then passive
 // monitoring. A Monitoring sibling must never hide a Plan Ready thread.
-const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
+const THREAD_STATUS_PRIORITY: Record<string, number> = {
   "Pending Approval": 6,
   "Awaiting Input": 5,
   Working: 4,
@@ -543,6 +536,7 @@ type ThreadStatusInput = Pick<
   | "latestTurn"
   | "session"
   | "backgroundLiveness"
+  | "externalStatus"
 > & {
   lastVisitedAt?: string | undefined;
 };
@@ -1028,6 +1022,28 @@ export function resolveThreadStatusPill(input: {
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
     };
+  }
+
+  const externalStatus = thread.externalStatus;
+  if (
+    externalStatus !== undefined &&
+    externalStatus !== null &&
+    (externalStatus.expiresAt === null || Date.parse(externalStatus.expiresAt) > Date.now())
+  ) {
+    const colorClasses: Record<string, readonly [string, string]> = {
+      amber: ["text-amber-600 dark:text-amber-300/90", "bg-amber-500 dark:bg-amber-300/90"],
+      emerald: [
+        "text-emerald-600 dark:text-emerald-300/90",
+        "bg-emerald-500 dark:bg-emerald-300/90",
+      ],
+      indigo: ["text-indigo-600 dark:text-indigo-300/90", "bg-indigo-500 dark:bg-indigo-300/90"],
+      red: ["text-red-600 dark:text-red-300/90", "bg-red-500 dark:bg-red-300/90"],
+      sky: ["text-sky-600 dark:text-sky-300/90", "bg-sky-500 dark:bg-sky-300/90"],
+      violet: ["text-violet-600 dark:text-violet-300/90", "bg-violet-500 dark:bg-violet-300/90"],
+      slate: ["text-slate-600 dark:text-slate-300/90", "bg-slate-500 dark:bg-slate-300/90"],
+    };
+    const [colorClass, dotClass] = colorClasses[externalStatus.color] ?? colorClasses.slate;
+    return { label: externalStatus.text, colorClass, dotClass, pulse: false };
   }
 
   if (thread.session?.status === "running") {

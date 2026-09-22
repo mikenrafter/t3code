@@ -629,6 +629,19 @@ export const OrchestrationSession = Schema.Struct({
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;
 
+/** A producer-owned temporary presentation overlay for a thread. */
+export const ExternalThreadStatus = Schema.Struct({
+  source: TrimmedNonEmptyString,
+  key: TrimmedNonEmptyString,
+  text: TrimmedNonEmptyString,
+  icon: TrimmedNonEmptyString,
+  color: TrimmedNonEmptyString,
+  notifyUser: Schema.Boolean,
+  expiresAt: Schema.NullOr(IsoDateTime),
+  updatedAt: IsoDateTime,
+});
+export type ExternalThreadStatus = typeof ExternalThreadStatus.Type;
+
 export const OrchestrationCheckpointFile = Schema.Struct({
   path: TrimmedNonEmptyString,
   kind: TrimmedNonEmptyString,
@@ -850,6 +863,7 @@ export const OrchestrationThread = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
+  externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
@@ -912,6 +926,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
   session: Schema.NullOr(OrchestrationSession),
+  externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
   hasPendingUserInput: Schema.Boolean,
@@ -1237,6 +1252,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
 }).check(
   Schema.makeFilter(
     (input) =>
@@ -1840,6 +1856,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   /** Pending state shared with clients. Null clears a matching request. */
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
+  externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),

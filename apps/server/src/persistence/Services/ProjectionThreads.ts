@@ -8,6 +8,7 @@
  */
 import {
   CommandId,
+  ExternalThreadStatus,
   IsoDateTime,
   ModelSelection,
   NonNegativeInt,
@@ -52,6 +53,7 @@ export const ProjectionThread = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),
   titleRegenerationStartedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   pendingApprovalCount: NonNegativeInt,
   pendingUserInputCount: NonNegativeInt,
