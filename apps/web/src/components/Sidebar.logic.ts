@@ -857,6 +857,17 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   return "ready";
 }
 
+export function isExternalThreadStatusActive(
+  status: SidebarThreadSummary["externalStatus"],
+  now = Date.now(),
+): status is NonNullable<SidebarThreadSummary["externalStatus"]> {
+  return (
+    status !== undefined &&
+    status !== null &&
+    (status.expiresAt === null || Date.parse(status.expiresAt) > now)
+  );
+}
+
 /** First VALID timestamp wins: `a ?? b` falls through on null, but a present-
     yet-malformed string must also fall through to the next candidate rather
     than sink the row to the epoch. */

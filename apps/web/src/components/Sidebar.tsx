@@ -162,6 +162,7 @@ import {
   formatWorkingDurationLabel,
   firstValidTimestampMs,
   hasUnseenCompletion,
+  isExternalThreadStatusActive,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
@@ -1132,11 +1133,33 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     isActive: props.isActive,
     isSelected,
   });
+  const externalStatus = thread.externalStatus;
+  const activeExternalStatus = isExternalThreadStatusActive(externalStatus) ? externalStatus : null;
+  const hasActiveExternalStatus = activeExternalStatus !== null;
+  const externalStatusClassName =
+    externalStatus?.color === "amber"
+      ? "text-amber-700 dark:text-amber-300"
+      : externalStatus?.color === "emerald"
+        ? "text-emerald-700 dark:text-emerald-300"
+        : externalStatus?.color === "indigo"
+          ? "text-indigo-600 dark:text-indigo-300"
+          : externalStatus?.color === "red"
+            ? "text-red-700 dark:text-red-300"
+            : externalStatus?.color === "sky"
+              ? "text-sky-600 dark:text-sky-400"
+              : externalStatus?.color === "violet"
+                ? "text-violet-700 dark:text-violet-300"
+                : "text-slate-600 dark:text-slate-300";
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
-  const topStatus =
-    status === "working"
+  const topStatus = hasActiveExternalStatus
+    ? {
+        label: activeExternalStatus.text,
+        icon: "external" as const,
+        className: externalStatusClassName,
+      }
+    : status === "working"
       ? {
           label: "Working",
           icon: "working" as const,
@@ -1837,6 +1860,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             <EyeIcon aria-hidden className="size-4 shrink-0" />
                           ) : topStatus.icon === "done" ? (
                             <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
+                          ) : topStatus.icon === "external" ? (
+                            activeExternalStatus?.icon === "clock" ? (
+                              <ClockIcon aria-hidden className="size-4 shrink-0" />
+                            ) : activeExternalStatus?.icon === "pause" ? (
+                              <AlarmClockOffIcon aria-hidden className="size-4 shrink-0" />
+                            ) : (
+                              <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+                            )
                           ) : null}
                           {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make

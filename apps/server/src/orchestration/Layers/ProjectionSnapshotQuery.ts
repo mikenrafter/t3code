@@ -15,6 +15,7 @@ import {
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
+  ExternalThreadStatus,
   ProjectScript,
   ProjectIconOverride,
   TurnId,
@@ -130,6 +131,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     titleState: Schema.NullOr(Schema.fromJsonString(ThreadTitleState)),
+    externalStatus: Schema.NullOr(Schema.fromJsonString(ExternalThreadStatus)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
   }),
@@ -3581,6 +3583,9 @@ pending_approval_requests AS (
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         titleState: threadRow.value.titleState,
+        ...(threadRow.value.externalStatus !== undefined
+          ? { externalStatus: threadRow.value.externalStatus }
+          : {}),
         deletedAt: null,
         messages: messageRows.map((row) => {
           const message = {
