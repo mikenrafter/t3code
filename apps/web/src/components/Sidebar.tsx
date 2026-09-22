@@ -1865,6 +1865,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                               <ClockIcon aria-hidden className="size-4 shrink-0" />
                             ) : activeExternalStatus?.icon === "pause" ? (
                               <AlarmClockOffIcon aria-hidden className="size-4 shrink-0" />
+                            ) : activeExternalStatus?.icon === "check" ? (
+                              <CheckIcon aria-hidden className="size-4 shrink-0" />
                             ) : (
                               <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
                             )
