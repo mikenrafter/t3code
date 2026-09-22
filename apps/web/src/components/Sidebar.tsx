@@ -1134,7 +1134,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     isSelected,
   });
   const externalStatus = thread.externalStatus;
-  const activeExternalStatus = isExternalThreadStatusActive(externalStatus) ? externalStatus : null;
+  const activeExternalStatus = isExternalThreadStatusActive(
+    externalStatus,
+    Date.now(),
+    thread.session ?? undefined,
+  )
+    ? externalStatus
+    : null;
   const hasActiveExternalStatus = activeExternalStatus !== null;
   const externalStatusClassName =
     externalStatus?.color === "amber"

@@ -1669,10 +1669,12 @@ it.effect("decodes an expiring external thread status with notification metadata
       color: "amber",
       notifyUser: true,
       expiresAt: "2026-09-22T12:00:00.000Z",
+      clearsOn: "work",
       updatedAt: "2026-09-22T11:55:00.000Z",
     });
 
     assert.strictEqual(status.notifyUser, true);
     assert.strictEqual(status.expiresAt, "2026-09-22T12:00:00.000Z");
+    assert.strictEqual(status.clearsOn, "work");
   }),
 );

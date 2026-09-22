@@ -638,6 +638,9 @@ export const ExternalThreadStatus = Schema.Struct({
   color: TrimmedNonEmptyString,
   notifyUser: Schema.Boolean,
   expiresAt: Schema.NullOr(IsoDateTime),
+  clearsOn: Schema.NullOr(Schema.Literals(["work", "error", "done"])).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   updatedAt: IsoDateTime,
 });
 export type ExternalThreadStatus = typeof ExternalThreadStatus.Type;

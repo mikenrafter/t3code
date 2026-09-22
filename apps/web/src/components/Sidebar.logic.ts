@@ -860,10 +860,28 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
 export function isExternalThreadStatusActive(
   status: SidebarThreadSummary["externalStatus"],
   now = Date.now(),
+  nativeSession?: { readonly status: string; readonly updatedAt: string },
 ): status is NonNullable<SidebarThreadSummary["externalStatus"]> {
+  const nativeStatus = nativeSession?.status;
+  const nativeUpdatedAt = nativeSession === undefined ? NaN : Date.parse(nativeSession.updatedAt);
+  const externalUpdatedAt =
+    status === undefined || status === null ? NaN : Date.parse(status.updatedAt);
+  const nativeTransitionIsNewer =
+    Number.isFinite(nativeUpdatedAt) &&
+    Number.isFinite(externalUpdatedAt) &&
+    nativeUpdatedAt > externalUpdatedAt;
+  const clearsOnNativeTransition =
+    status?.clearsOn === "work"
+      ? nativeStatus === "running" || nativeStatus === "starting"
+      : status?.clearsOn === "error"
+        ? nativeStatus === "error"
+        : status?.clearsOn === "done"
+          ? nativeStatus === "stopped" || nativeStatus === "ready" || nativeStatus === "interrupted"
+          : false;
   return (
     status !== undefined &&
     status !== null &&
+    !(nativeTransitionIsNewer && clearsOnNativeTransition) &&
     (status.expiresAt === null || Date.parse(status.expiresAt) > now)
   );
 }
@@ -1036,11 +1054,7 @@ export function resolveThreadStatusPill(input: {
   }
 
   const externalStatus = thread.externalStatus;
-  if (
-    externalStatus !== undefined &&
-    externalStatus !== null &&
-    (externalStatus.expiresAt === null || Date.parse(externalStatus.expiresAt) > Date.now())
-  ) {
+  if (isExternalThreadStatusActive(externalStatus, Date.now(), thread.session ?? undefined)) {
     const colorClasses: Record<string, readonly [string, string]> = {
       amber: ["text-amber-600 dark:text-amber-300/90", "bg-amber-500 dark:bg-amber-300/90"],
       emerald: [

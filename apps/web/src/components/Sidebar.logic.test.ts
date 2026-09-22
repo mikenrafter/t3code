@@ -18,6 +18,7 @@ import {
   getFallbackThreadIdAfterDelete,
   getProjectSortTimestamp,
   hasUnseenCompletion,
+  isExternalThreadStatusActive,
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
@@ -2012,11 +2013,32 @@ describe("resolveThreadStatusPill", () => {
             color: "amber",
             notifyUser: true,
             expiresAt: "2099-09-22T12:00:00.000Z",
+            clearsOn: "work",
             updatedAt: "2026-09-22T11:55:00.000Z",
           },
         },
       }),
     ).toMatchObject({ label: "Compacting", colorClass: expect.stringContaining("amber") });
+  });
+
+  it("clears an external status when newer native work begins", () => {
+    expect(
+      isExternalThreadStatusActive(
+        {
+          source: "usagewindow",
+          key: "paused",
+          text: "Paused",
+          icon: "pause",
+          color: "slate",
+          notifyUser: true,
+          expiresAt: null,
+          clearsOn: "work",
+          updatedAt: "2026-09-22T11:55:00.000Z",
+        },
+        Date.parse("2026-09-22T12:00:00.000Z"),
+        { status: "running", updatedAt: "2026-09-22T11:56:00.000Z" },
+      ),
+    ).toBe(false);
   });
 
   it("falls back to working when the thread is actively running without blockers", () => {
