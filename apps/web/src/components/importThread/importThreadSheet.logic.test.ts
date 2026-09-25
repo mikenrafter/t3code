@@ -296,7 +296,7 @@ describe("importThreadRowBlockedReason / isImportThreadRowDisabled", () => {
 });
 
 describe("formatImportThreadContextParts", () => {
-  it("prefers used over max and keeps native percent independent", () => {
+  it("shows max beside used and keeps native percent independent", () => {
     expect(
       formatImportThreadContextParts({
         contextMaxTokens: 200_000,
@@ -304,7 +304,7 @@ describe("formatImportThreadContextParts", () => {
         contextUsagePercent: 37,
       }),
     ).toEqual({
-      maxLabel: null,
+      maxLabel: expect.stringMatching(/200/),
       usedLabel: expect.stringMatching(/14/),
       percentLabel: expect.stringMatching(/37/),
     });
@@ -335,7 +335,7 @@ describe("formatImportThreadContextParts", () => {
         contextMaxTokens: 100_000,
       }),
     ).toEqual({
-      maxLabel: null,
+      maxLabel: expect.stringMatching(/100/),
       usedLabel: expect.stringMatching(/8/),
       percentLabel: null,
     });

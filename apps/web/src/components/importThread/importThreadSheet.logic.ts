@@ -171,9 +171,9 @@ export function isImportThreadRowDisabled(entry: AgentSessionEntry): boolean {
 }
 
 /**
- * Context chips for the import row. Prefer last-used tokens for the active
- * history mode; only show max when used is absent. Native percent stands alone
- * and is never derived from used/max.
+ * Context chips for the import row. Used tokens follow the active history mode;
+ * max is always shown when known. Native percent stands alone and is never
+ * derived from used/max.
  */
 export function formatImportThreadContextParts(
   entry: Pick<
@@ -193,7 +193,7 @@ export function formatImportThreadContextParts(
   const usedLabel =
     usedTokens !== undefined ? `${formatContextWindowTokens(usedTokens)} used` : null;
   const maxLabel =
-    usedLabel === null && entry.contextMaxTokens !== undefined
+    entry.contextMaxTokens !== undefined
       ? `${formatContextWindowTokens(entry.contextMaxTokens)} max`
       : null;
   const percentLabel =

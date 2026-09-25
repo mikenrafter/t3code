@@ -28,8 +28,10 @@ export const agentSessionImport = createEnvironmentRpcCommand(connectionAtomRunt
 export const agentSessionList = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
   label: "environment-data:agent-sessions:list",
   tag: WS_METHODS.agentSessionsList,
-  staleTimeMs: 15_000,
-  idleTtlMs: 5 * 60_000,
+  // Server also caches descriptor polish on disk; keep the client warm across
+  // dialog closes without forcing a full rescan on every open.
+  staleTimeMs: 5 * 60_000,
+  idleTtlMs: 30 * 60_000,
 });
 
 export const agentSessionAttach = createEnvironmentRpcCommand(connectionAtomRuntime, {

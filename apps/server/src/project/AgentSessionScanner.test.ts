@@ -3541,6 +3541,104 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("strips Cursor timestamps and skips harness status replies for title/preview", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-cursor-strip-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-cursor-strip-codex-");
+        const cursorHomePath = yield* makeTempDir("t3code-descriptor-cursor-strip-home-");
+        const workspace = yield* makeTempDir("t3code-descriptor-cursor-strip-workspace-");
+        const agentId = "88888888-8888-4888-8888-888888888888";
+        const slug = AgentSessionScanner.cursorProjectSlug(workspace);
+        const chatHash = AgentSessionScanner.cursorChatDirectoryHash(workspace);
+
+        yield* writeTranscript({
+          filePath: path.join(
+            cursorHomePath,
+            "projects",
+            slug,
+            "agent-transcripts",
+            agentId,
+            `${agentId}.jsonl`,
+          ),
+          contents: [
+            encodeTranscriptRecord({
+              role: "user",
+              message: {
+                content: [
+                  {
+                    type: "text",
+                    text: "<timestamp>Friday, Sep 25, 2026, 2:52 AM (UTC-6)</timestamp>\n<user_query>\nPolish Cursor import titles\n</user_query>",
+                  },
+                ],
+              },
+            }),
+            encodeTranscriptRecord({
+              role: "assistant",
+              message: {
+                content: [{ type: "text", text: "Working through the title polish." }],
+              },
+            }),
+            encodeTranscriptRecord({
+              role: "assistant",
+              message: {
+                content: [{ type: "text", text: "Give the user an update on progress." }],
+              },
+            }),
+            encodeTranscriptRecord({
+              role: "user",
+              message: {
+                content: [
+                  {
+                    type: "text",
+                    text: "<user_query>\nBriefly inform the user about the task result and perform any follow-up actions (if needed).\n</user_query>",
+                  },
+                ],
+              },
+            }),
+            encodeTranscriptRecord({
+              role: "assistant",
+              message: {
+                content: [
+                  {
+                    type: "text",
+                    text: "The background skill command task finished successfully.",
+                  },
+                ],
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+        yield* writeCursorChatMeta({
+          storeDbPath: path.join(cursorHomePath, "chats", chatHash, agentId, "store.db"),
+          meta: {
+            agentId,
+            name: "New Agent",
+            createdAt: Date.parse("2026-08-24T10:50:00.000Z"),
+          },
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          cursorHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toHaveLength(1);
+        expect(page.descriptors[0]?.title).toBe("Polish Cursor import titles");
+        expect(page.descriptors[0]?.title).not.toMatch(/timestamp|Briefly inform/i);
+        expect(page.descriptors[0]?.promptPreview).toBe("Working through the title polish.");
+        expect(page.descriptors[0]?.promptPreview).not.toMatch(
+          /Give the user|Briefly inform|background skill/i,
+        );
+      }),
+    );
+
     it.effect("ignores generic Cursor chat titles and titles from the first usable prompt", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

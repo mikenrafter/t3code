@@ -58,7 +58,7 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
-import { readCursorComposerContextUsage } from "../provider/Layers/cursorComposerData.ts";
+import { loadCursorComposerContextUsageIndex } from "../provider/Layers/cursorComposerData.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -66,6 +66,7 @@ import {
   createTranscriptJsonSelector,
   TranscriptJsonLimitError,
 } from "./AgentSessionJson.ts";
+import { loadAgentSessionDescriptorCache } from "./AgentSessionDescriptorCache.ts";
 
 /** Chunk size for full transcript reads. */
 const TRANSCRIPT_PREFIX_BYTES = 32 * 1024;
@@ -332,11 +333,29 @@ function extractText(
     .join("\n");
 }
 
-/** Cursor wraps the live prompt in `<user_query>`; list/import should show the inner text. */
+/** Cursor wraps prompts in `<user_query>` and often prefixes `<timestamp>`; strip both. */
+function stripHarnessMarkup(text: string): string {
+  let next = text.trim();
+  const userQuery = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/i.exec(next);
+  if (userQuery?.[1]?.trim()) {
+    next = userQuery[1].trim();
+  }
+  next = next
+    // Drop tagged harness blocks entirely (tags + body), not just the tags.
+    .replace(/<timestamp\b[^>]*>[\s\S]*?<\/timestamp>/gi, " ")
+    .replace(/<\/?timestamp\b[^>]*>/gi, " ")
+    .replace(/<\/?user_query\b[^>]*>/gi, " ")
+    .replace(/<user_info\b[^>]*>[\s\S]*?<\/user_info>/gi, " ")
+    .replace(/<runtime_info\b[^>]*>[\s\S]*?<\/runtime_info>/gi, " ")
+    .replace(/<pull_request_linking\b[^>]*>[\s\S]*?<\/pull_request_linking>/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return next;
+}
+
+/** @deprecated Prefer {@link stripHarnessMarkup}. */
 function stripUserQueryWrapper(text: string): string {
-  const match = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/i.exec(text);
-  const inner = match?.[1]?.trim();
-  return inner && inner.length > 0 ? inner : text.trim();
+  return stripHarnessMarkup(text);
 }
 
 /**
@@ -345,7 +364,7 @@ function stripUserQueryWrapper(text: string): string {
  * are fine — only reject dumps and tag-heavy scaffolding.
  */
 function isUsableListPreviewText(text: string): boolean {
-  const trimmed = text.trim();
+  const trimmed = stripHarnessMarkup(text);
   if (trimmed.length === 0) return false;
   const lower = trimmed.toLowerCase();
   if (
@@ -356,11 +375,23 @@ function isUsableListPreviewText(text: string): boolean {
     lower.startsWith("<runtime_info") ||
     lower.startsWith("<pull_request_linking") ||
     lower.startsWith("<recommended_plugins") ||
+    lower.startsWith("<timestamp") ||
     lower.startsWith("# system") ||
     // System-persona dumps, not ordinary prompts like "You are reviewing…".
     lower.startsWith("you are a ") ||
     lower.startsWith("you are an ") ||
     lower.startsWith("you are the ") ||
+    // Cursor agent↔harness status lines / follow-up directives — not titles.
+    lower.startsWith("give the user ") ||
+    lower.startsWith("i'll give the user ") ||
+    lower.startsWith("i will give the user ") ||
+    lower.startsWith("briefly inform the user") ||
+    lower.startsWith("inform the user about") ||
+    lower.startsWith("inform the user of") ||
+    lower.includes("perform any follow-up actions") ||
+    lower.startsWith("the background skill command") ||
+    lower === "done" ||
+    lower === "ok" ||
     (lower.includes("claude.md") && trimmed.length > 400)
   ) {
     return false;
@@ -877,6 +908,8 @@ function extractDescriptorFields(
   readonly sessionId: string | null;
   readonly prompt: string | null;
   readonly assistantPreview: string | null;
+  /** User record that failed usability — suppress following harness status replies. */
+  readonly harnessUser: boolean;
   readonly title: string | null;
   readonly timestamp: string | null;
   readonly isCompactSummary: boolean;
@@ -888,6 +921,7 @@ function extractDescriptorFields(
     sessionId: null,
     prompt: null,
     assistantPreview: null,
+    harnessUser: false,
     title: null,
     timestamp: null,
     isCompactSummary: false,
@@ -912,6 +946,7 @@ function extractDescriptorFields(
     const sessionId = record.sessionId?.trim() || null;
     let prompt: string | null = null;
     let assistantPreview: string | null = null;
+    let harnessUser = false;
     const role =
       record.role === "user" || record.role === "assistant"
         ? record.role
@@ -919,10 +954,11 @@ function extractDescriptorFields(
           ? record.message.role
           : null;
     if (role === "user") {
-      const text = stripUserQueryWrapper(extractText(record.message?.content));
+      const text = stripHarnessMarkup(extractText(record.message?.content));
       if (isUsableListPreviewText(text)) prompt = text;
+      else harnessUser = text.trim().length > 0;
     } else if (role === "assistant") {
-      const text = extractText(record.message?.content);
+      const text = stripHarnessMarkup(extractText(record.message?.content));
       if (isUsableListPreviewText(text)) assistantPreview = text;
     }
     return {
@@ -930,6 +966,7 @@ function extractDescriptorFields(
       sessionId,
       prompt,
       assistantPreview,
+      harnessUser,
       title: null,
       timestamp,
       isCompactSummary,
@@ -942,10 +979,12 @@ function extractDescriptorFields(
     const title = record.aiTitle?.trim() || null;
     let prompt: string | null = null;
     let assistantPreview: string | null = null;
+    let harnessUser = false;
     if (record.isSidechain !== true && record.isMeta !== true && record.isCompactSummary !== true) {
       if (record.type === "user") {
         const text = extractText(record.message?.content);
         if (isUsableListPreviewText(text)) prompt = text;
+        else harnessUser = text.trim().length > 0;
       } else if (record.type === "assistant") {
         const text = extractText(record.message?.content);
         if (isUsableListPreviewText(text)) assistantPreview = text;
@@ -956,6 +995,7 @@ function extractDescriptorFields(
       sessionId,
       prompt,
       assistantPreview,
+      harnessUser,
       title,
       timestamp,
       isCompactSummary,
@@ -970,13 +1010,16 @@ function extractDescriptorFields(
   }
   let prompt: string | null = null;
   let assistantPreview: string | null = null;
+  let harnessUser = false;
   if (record.type === "event_msg" && record.payload?.type === "user_message") {
     const text = record.payload.message?.trim() ?? "";
     if (isUsableListPreviewText(text)) prompt = text;
+    else harnessUser = text.length > 0;
   } else if (record.type === "response_item" && record.payload?.type === "message") {
     const text = extractText(record.payload.content);
     if (record.payload.role === "user") {
       if (isUsableListPreviewText(text)) prompt = text;
+      else harnessUser = text.trim().length > 0;
     } else if (record.payload.role === "assistant") {
       if (isUsableListPreviewText(text)) assistantPreview = text;
     }
@@ -986,6 +1029,7 @@ function extractDescriptorFields(
     sessionId,
     prompt,
     assistantPreview,
+    harnessUser,
     title: null,
     timestamp,
     isCompactSummary,
@@ -1120,6 +1164,9 @@ export const make = Effect.gen(function* () {
   const foldWorktreeCase = (yield* HostProcessPlatform) === "win32";
   const hostEnvironment = yield* HostProcessEnvironment;
   const homeDir = NodeOS.homedir();
+  const descriptorCache = yield* loadAgentSessionDescriptorCache(
+    serverConfig.providerStatusCacheDir,
+  );
   // `/private/tmp` is what macOS reports for sessions started in `/tmp`.
   const excludedProjectRoots = new Set(
     [homeDir, NodeOS.tmpdir(), "/tmp", "/private/tmp"].map((directory) =>
@@ -1320,6 +1367,7 @@ export const make = Effect.gen(function* () {
             let sessionId = source === "codex" ? "" : fallbackSessionId;
             let prompt: string | null = null;
             let assistantPreview: string | null = null;
+            let suppressAssistantPreview = false;
             let title: string | null = null;
             let firstTimestamp: string | null = null;
             let lastTimestamp: string | null = null;
@@ -1335,8 +1383,14 @@ export const make = Effect.gen(function* () {
                 sessionId = fields.sessionId;
               }
               if (fields.title !== null) title = fields.title;
-              if (fields.prompt !== null && prompt === null) prompt = fields.prompt;
-              if (fields.assistantPreview !== null) assistantPreview = fields.assistantPreview;
+              if (fields.harnessUser) suppressAssistantPreview = true;
+              if (fields.prompt !== null) {
+                if (prompt === null) prompt = fields.prompt;
+                suppressAssistantPreview = false;
+              }
+              if (fields.assistantPreview !== null && !suppressAssistantPreview) {
+                assistantPreview = fields.assistantPreview;
+              }
               if (fields.isCompactSummary) hasCompactionSummary = true;
               if (fields.contextMaxTokens !== null) contextMaxTokens = fields.contextMaxTokens;
               if (fields.contextUsedTokens !== null) {
@@ -1399,6 +1453,10 @@ export const make = Effect.gen(function* () {
             // user prompt (system dumps already filtered by isUsableListPreviewText).
             const previewSource = assistantPreview ?? prompt;
             if (previewSource === null) return null;
+            // Cursor: never title from agent↔harness status replies — prefer the
+            // first usable user prompt, then the session id.
+            const titleSource =
+              title ?? prompt ?? (source === "cursor" ? null : previewSource) ?? sessionId;
             const contextUsedTokens = selectContextUsedForHistoryMode({
               historyMode: "compaction",
               hasCompactionSummary,
@@ -1414,7 +1472,7 @@ export const make = Effect.gen(function* () {
             return {
               providerSessionId: sessionId,
               promptPreview: truncatePreview(previewSource),
-              title: truncatePreview(title ?? prompt ?? previewSource, 120),
+              title: truncatePreview(titleSource, 120),
               createdAt: firstTimestamp ?? fallbackTimestamp,
               lastMessageAt: lastTimestamp ?? firstTimestamp ?? fallbackTimestamp,
               hasCompactionSummary,
@@ -1460,6 +1518,7 @@ export const make = Effect.gen(function* () {
             const text = new TextDecoder().decode(chunk.value);
             const lines = text.split("\n");
             let assistantPreview: string | null = null;
+            let suppressAssistantPreview = false;
             let lastTimestamp: string | null = null;
             let hasCompactionSummary = false;
             let sawCompaction = alreadySawCompaction;
@@ -1471,7 +1530,11 @@ export const make = Effect.gen(function* () {
               const trimmed = lines[index]?.trim() ?? "";
               if (trimmed.length === 0) continue;
               const fields = extractDescriptorFields(source, trimmed);
-              if (fields.assistantPreview !== null) assistantPreview = fields.assistantPreview;
+              if (fields.harnessUser) suppressAssistantPreview = true;
+              if (fields.prompt !== null) suppressAssistantPreview = false;
+              if (fields.assistantPreview !== null && !suppressAssistantPreview) {
+                assistantPreview = fields.assistantPreview;
+              }
               if (fields.timestamp !== null) lastTimestamp = fields.timestamp;
               if (fields.isCompactSummary) {
                 hasCompactionSummary = true;
@@ -1930,6 +1993,12 @@ export const make = Effect.gen(function* () {
     let truncated = false;
     let providerError: string | null = null;
 
+    // Native % lives in Cursor IDE global state.vscdb, not chats/*/store.db.
+    // Load once per discovery pass (composerData + headers fallback).
+    const composerUsageIndex = loadCursorComposerContextUsageIndex({
+      env: hostEnvironment,
+    });
+
     for (const home of homes) {
       const projectsRoot = path.join(home.homePath, "projects");
       const probed = yield* fileSystem.readDirectory(projectsRoot).pipe(
@@ -1968,11 +2037,6 @@ export const make = Effect.gen(function* () {
           const chatMeta = readCursorChatMeta(storeDbPath);
           if (chatMeta?.isSubagent === true) continue;
 
-          // Native % lives in Cursor IDE global state.vscdb, not chats/*/store.db.
-          const composerUsage = readCursorComposerContextUsage(trimmedId, {
-            env: hostEnvironment,
-          });
-
           const stats = yield* statOption(filePath);
           if (
             Option.isNone(stats) ||
@@ -1982,21 +2046,22 @@ export const make = Effect.gen(function* () {
             continue;
           }
           seenFiles.add(filePath);
+          const contextUsagePercent = composerUsageIndex.get(trimmedId);
           transcripts.push({
             filePath,
             mtimeMs: stats.value.mtime.value.getTime(),
             providerInstanceId: home.providerInstanceId,
             size: Number(stats.value.size),
-            ...(chatMeta?.name && !isGenericCursorChatTitle(chatMeta.name)
-              ? { titleOverride: chatMeta.name }
+            ...(chatMeta?.name &&
+            !isGenericCursorChatTitle(chatMeta.name) &&
+            isUsableListPreviewText(chatMeta.name)
+              ? { titleOverride: stripHarnessMarkup(chatMeta.name) }
               : {}),
             ...(chatMeta?.createdAtMs != null ? { createdAtMs: chatMeta.createdAtMs } : {}),
             ...(chatMeta?.lastUpdatedAtMs != null
               ? { lastUpdatedAtMs: chatMeta.lastUpdatedAtMs }
               : {}),
-            ...(composerUsage != null
-              ? { contextUsagePercent: composerUsage.contextUsagePercent }
-              : {}),
+            ...(contextUsagePercent !== undefined ? { contextUsagePercent } : {}),
             cwd: root,
           });
         }
@@ -2510,13 +2575,57 @@ export const make = Effect.gen(function* () {
         const stats = yield* statOption(transcript.filePath);
         if (Option.isNone(stats) || stats.value.type !== "File") continue;
         const fileSize = Number(stats.value.size);
-        const meta = yield* readDescriptorMeta(candidate.source, {
-          filePath: transcript.filePath,
-          mtimeMs: transcript.mtimeMs,
-          providerInstanceId: candidate.providerInstanceId,
+        const cached = descriptorCache.get(transcript.filePath, {
           size: fileSize,
+          mtimeMs: transcript.mtimeMs,
         });
+        const meta =
+          cached !== null
+            ? {
+                providerSessionId: cached.providerSessionId,
+                promptPreview: cached.promptPreview,
+                title: cached.title,
+                createdAt: cached.createdAt,
+                lastMessageAt: cached.lastMessageAt,
+                hasCompactionSummary: cached.hasCompactionSummary,
+                ...(cached.contextUsedTokens !== undefined
+                  ? { contextUsedTokens: cached.contextUsedTokens }
+                  : {}),
+                ...(cached.contextUsedTokensFull !== undefined
+                  ? { contextUsedTokensFull: cached.contextUsedTokensFull }
+                  : {}),
+                ...(cached.contextMaxTokens !== undefined
+                  ? { contextMaxTokens: cached.contextMaxTokens }
+                  : {}),
+              }
+            : yield* readDescriptorMeta(candidate.source, {
+                filePath: transcript.filePath,
+                mtimeMs: transcript.mtimeMs,
+                providerInstanceId: candidate.providerInstanceId,
+                size: fileSize,
+              });
         if (meta === null) continue;
+        if (cached === null) {
+          descriptorCache.set(transcript.filePath, {
+            size: fileSize,
+            mtimeMs: transcript.mtimeMs,
+            providerSessionId: meta.providerSessionId,
+            promptPreview: meta.promptPreview,
+            title: meta.title,
+            createdAt: meta.createdAt,
+            lastMessageAt: meta.lastMessageAt,
+            hasCompactionSummary: meta.hasCompactionSummary,
+            ...(meta.contextUsedTokens !== undefined
+              ? { contextUsedTokens: meta.contextUsedTokens }
+              : {}),
+            ...(meta.contextUsedTokensFull !== undefined
+              ? { contextUsedTokensFull: meta.contextUsedTokensFull }
+              : {}),
+            ...(meta.contextMaxTokens !== undefined
+              ? { contextMaxTokens: meta.contextMaxTokens }
+              : {}),
+          });
+        }
 
         const lastActiveAt = DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs));
         const createdAt =
@@ -2570,6 +2679,7 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      yield* descriptorCache.flush;
       return { descriptors, providerErrors, truncated };
     });
 

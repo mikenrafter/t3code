@@ -25,10 +25,11 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "@tanstack/react-router";
 
 import { openCommandPalette } from "../../commandPaletteBus";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useClientSettings } from "../../hooks/useSettings";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { selectProjectGroupingSettings } from "../../logicalProject";
@@ -49,6 +50,11 @@ import { getDriverOption } from "../settings/providerDriverMeta";
 import { ProjectEnvironmentBadge } from "../ProjectEnvironmentBadge";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { sortLogicalProjectsForSidebar } from "../Sidebar.logic";
+import {
+  ANCHORED_COPY_TOAST_TIMEOUT_MS,
+  showAnchoredCopyErrorToast,
+  showAnchoredCopySuccessToast,
+} from "../ui/anchoredCopyToast";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Dialog, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -111,6 +117,35 @@ export function ImportThreadSheetHost() {
         if (!open) appAtomRegistry.set(importThreadSheetRequestAtom, null);
       }}
     />
+  );
+}
+
+/** Copies the provider's session id (not a T3 thread id) for debugging / lookup. */
+function ImportThreadCopySessionIdButton({ providerSessionId }: { providerSessionId: string }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const { copyToClipboard, isCopied } = useCopyToClipboard<void>({
+    target: "provider session id",
+    onCopy: () => showAnchoredCopySuccessToast(ref),
+    onError: (error) => showAnchoredCopyErrorToast(ref, error),
+    timeout: ANCHORED_COPY_TOAST_TIMEOUT_MS,
+  });
+
+  return (
+    <Button
+      ref={ref}
+      type="button"
+      size="xs"
+      variant="ghost"
+      className="mt-1 shrink-0 text-muted-foreground"
+      aria-label="Copy provider session ID"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        copyToClipboard(providerSessionId, undefined);
+      }}
+    >
+      {isCopied ? "Copied" : "Copy ID"}
+    </Button>
   );
 }
 
@@ -588,31 +623,34 @@ function ImportThreadSheet({
                   useCompaction ? "compaction" : "full",
                 );
                 const entryProject = projectById.get(entry.projectId);
-                const metaParts = [
-                  entry.projectTitle,
-                  providerLabel(entry.provider),
-                  timeParts.createdLabel,
-                  timeParts.lastMessageLabel,
-                  contextParts.maxLabel,
-                  contextParts.usedLabel,
-                  contextParts.percentLabel,
-                ].filter((part): part is string => part !== null);
+                const mutedMetaClass = "text-muted-foreground/55";
+                const activeMetaClass = "text-muted-foreground/80";
                 return (
-                  <li key={rowKey} className="min-w-0">
+                  <li
+                    key={rowKey}
+                    className={cn(
+                      "flex min-w-0 items-start gap-1 overflow-hidden rounded-lg px-1 py-1 transition-colors",
+                      "hover:bg-accent has-[:focus-visible]:bg-accent",
+                      rowDisabled && "opacity-64",
+                    )}
+                  >
                     <button
                       type="button"
                       role="option"
                       disabled={rowDisabled}
                       aria-label={`${providerLabel(entry.provider)} ${entry.title}`}
                       className={cn(
-                        "flex w-full min-w-0 items-start gap-3 overflow-hidden rounded-lg px-2 py-2 text-left transition-colors",
-                        "hover:bg-accent focus-visible:bg-accent focus-visible:outline-none",
-                        "disabled:opacity-64",
+                        "flex min-w-0 flex-1 items-start gap-3 overflow-hidden rounded-md px-1 py-1 text-left",
+                        "focus-visible:outline-none",
                       )}
                       onClick={() => void handleAttach(entry)}
                     >
                       <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                        {Icon ? <Icon className="size-4" /> : null}
+                        {entryProject ? (
+                          <ProjectFavicon project={entryProject} className="size-4 shrink-0" />
+                        ) : (
+                          <span className="size-4 rounded-sm bg-muted-foreground/20" />
+                        )}
                       </span>
                       <span className="min-w-0 flex-1 overflow-hidden">
                         <span className="block truncate text-sm font-medium text-foreground">
@@ -626,19 +664,50 @@ function ImportThreadSheet({
                             {blockedReason}
                           </span>
                         ) : null}
-                        {metaParts.length > 0 ? (
-                          <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground/80">
-                            {entryProject ? (
-                              <ProjectFavicon project={entryProject} className="size-3 shrink-0" />
-                            ) : null}
-                            <span className="min-w-0 truncate">{metaParts.join(" · ")}</span>
+                        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]">
+                          {Icon ? <Icon className={cn("size-3 shrink-0", mutedMetaClass)} /> : null}
+                          <span className={cn("truncate", mutedMetaClass)}>
+                            {entry.projectTitle}
                           </span>
-                        ) : null}
+                          <span className={mutedMetaClass}>·</span>
+                          <span className={mutedMetaClass}>{providerLabel(entry.provider)}</span>
+                          {timeParts.createdLabel ? (
+                            <>
+                              <span className={mutedMetaClass}>·</span>
+                              <span className={mutedMetaClass}>{timeParts.createdLabel}</span>
+                            </>
+                          ) : null}
+                          {timeParts.lastMessageLabel ? (
+                            <>
+                              <span className={mutedMetaClass}>·</span>
+                              <span className={activeMetaClass}>{timeParts.lastMessageLabel}</span>
+                            </>
+                          ) : null}
+                          {contextParts.maxLabel ? (
+                            <>
+                              <span className={mutedMetaClass}>·</span>
+                              <span className={mutedMetaClass}>{contextParts.maxLabel}</span>
+                            </>
+                          ) : null}
+                          {contextParts.usedLabel ? (
+                            <>
+                              <span className={mutedMetaClass}>·</span>
+                              <span className={activeMetaClass}>{contextParts.usedLabel}</span>
+                            </>
+                          ) : null}
+                          {contextParts.percentLabel ? (
+                            <>
+                              <span className={mutedMetaClass}>·</span>
+                              <span className={activeMetaClass}>{contextParts.percentLabel}</span>
+                            </>
+                          ) : null}
+                        </span>
                       </span>
                       {busy ? (
                         <LoaderCircleIcon className="mt-1 size-4 shrink-0 animate-spin text-muted-foreground" />
                       ) : null}
                     </button>
+                    <ImportThreadCopySessionIdButton providerSessionId={entry.providerSessionId} />
                   </li>
                 );
               })}
