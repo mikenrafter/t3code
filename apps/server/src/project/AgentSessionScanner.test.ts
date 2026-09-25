@@ -79,6 +79,8 @@ interface ScannerTestInput {
   readonly codexHomePath: string;
   /** When set, overrides CURSOR_HOME for project-scoped Cursor discovery. */
   readonly cursorHomePath?: string;
+  /** When set, overrides CURSOR_STATE_DB for composerData context %. */
+  readonly cursorStateDbPath?: string;
   readonly importedWorkspaceRoots?: ReadonlyArray<string>;
   /** Base dir for the test ServerConfig; worktreesDir derives from it. */
   readonly configBaseDir?: string;
@@ -103,9 +105,18 @@ const makeScannerTestLayer = (input: ScannerTestInput) =>
           input.configBaseDir ?? { prefix: "t3code-scanner-config-" },
         ),
         makeProjectionSnapshotQueryLayer(input.importedWorkspaceRoots ?? []),
-        ...(input.cursorHomePath === undefined
+        ...(input.cursorHomePath === undefined && input.cursorStateDbPath === undefined
           ? []
-          : [Layer.succeed(HostProcessEnvironment, { CURSOR_HOME: input.cursorHomePath })]),
+          : [
+              Layer.succeed(HostProcessEnvironment, {
+                ...(input.cursorHomePath === undefined
+                  ? {}
+                  : { CURSOR_HOME: input.cursorHomePath }),
+                ...(input.cursorStateDbPath === undefined
+                  ? {}
+                  : { CURSOR_STATE_DB: input.cursorStateDbPath }),
+              }),
+            ]),
       ),
     ),
   );
@@ -133,11 +144,17 @@ const runRecentThreads = (input: ScannerTestInput & { readonly workspaceRoot: st
   );
 
 const runRecentSessionDescriptors = (
-  input: ScannerTestInput & { readonly workspaceRoot: string; readonly limit: number },
+  input: ScannerTestInput & {
+    readonly workspaceRoot: string;
+    readonly limit: number;
+    readonly historyMode?: "compaction" | "full";
+  },
 ) =>
   Effect.gen(function* () {
     const scanner = yield* AgentSessionScanner.AgentSessionScanner;
-    return yield* scanner.listRecentSessionDescriptors(input.workspaceRoot, input.limit);
+    return yield* scanner.listRecentSessionDescriptors(input.workspaceRoot, input.limit, {
+      ...(input.historyMode === undefined ? {} : { historyMode: input.historyMode }),
+    });
   }).pipe(Effect.provide(makeScannerTestLayer(input)));
 
 const makeTempDir = Effect.fn("AgentSessionScanner.test.makeTempDir")(function* (prefix: string) {
@@ -2931,9 +2948,6 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           readonly name: string;
           readonly createdAt: number;
           readonly lastUpdatedAt?: number;
-          readonly composerData?: {
-            readonly contextUsagePercent?: number;
-          };
           readonly subagentInfo?: {
             readonly parentAgentId: string;
             readonly rootParentAgentId: string;
@@ -2957,6 +2971,30 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         });
       },
     );
+
+    const writeCursorStateComposerData = Effect.fn(
+      "AgentSessionScanner.test.writeCursorStateComposerData",
+    )(function* (input: {
+      readonly stateDbPath: string;
+      readonly sessionId: string;
+      readonly contextUsagePercent: number;
+    }) {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fileSystem.makeDirectory(path.dirname(input.stateDbPath), { recursive: true });
+      yield* Effect.sync(() => {
+        const db = new NodeSqlite.DatabaseSync(input.stateDbPath);
+        try {
+          db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
+          db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+            `composerData:${input.sessionId}`,
+            JSON.stringify({ contextUsagePercent: input.contextUsagePercent }),
+          );
+        } finally {
+          db.close();
+        }
+      });
+    });
 
     it.effect("lists Cursor sessions for this cwd and skips subagents", () =>
       Effect.gen(function* () {
@@ -3216,7 +3254,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
     );
 
     it.effect(
-      "reads Cursor composerData contextUsagePercent and createdAt without inventing token counts",
+      "reads Cursor composerData contextUsagePercent from state.vscdb without inventing token counts",
       () =>
         Effect.gen(function* () {
           const path = yield* Path.Path;
@@ -3225,6 +3263,8 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           const claudeHomePath = yield* makeTempDir("t3code-descriptor-cursor-pct-claude-");
           const codexHomePath = yield* makeTempDir("t3code-descriptor-cursor-pct-codex-");
           const cursorHomePath = yield* makeTempDir("t3code-descriptor-cursor-pct-home-");
+          const cursorStateDir = yield* makeTempDir("t3code-descriptor-cursor-pct-state-");
+          const cursorStateDbPath = path.join(cursorStateDir, "state.vscdb");
           const workspace = yield* makeTempDir("t3code-descriptor-cursor-pct-workspace-");
           const agentId = "66666666-6666-4666-8666-666666666666";
           const slug = AgentSessionScanner.cursorProjectSlug(workspace);
@@ -3264,14 +3304,19 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
               name: "Cursor percent",
               createdAt: createdAtMs,
               lastUpdatedAt: lastUpdatedAtMs,
-              composerData: { contextUsagePercent: 37 },
             },
+          });
+          yield* writeCursorStateComposerData({
+            stateDbPath: cursorStateDbPath,
+            sessionId: agentId,
+            contextUsagePercent: 37,
           });
 
           const page = yield* runRecentSessionDescriptors({
             claudeHomePath,
             codexHomePath,
             cursorHomePath,
+            cursorStateDbPath,
             workspaceRoot: workspace,
             limit: 15,
           });
@@ -3286,6 +3331,292 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           expect(page.descriptors[0]?.contextUsedTokens).toBeUndefined();
           expect(page.descriptors[0]?.contextMaxTokens).toBeUndefined();
         }),
+    );
+
+    it.effect("reads Codex token_count used/max without inventing a percent", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-codex-ctx-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-codex-ctx-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-codex-ctx-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-codex-ctx.jsonl",
+          ),
+          contents: [
+            encodeTranscriptRecord({
+              type: "session_meta",
+              timestamp: "2026-08-24T10:00:00.000Z",
+              payload: { id: "codex-ctx", cwd: workspace },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              timestamp: "2026-08-24T10:00:01.000Z",
+              payload: {
+                type: "task_started",
+                model_context_window: 258_400,
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              timestamp: "2026-08-24T10:00:02.000Z",
+              payload: { type: "user_message", message: "Meter Codex import context" },
+            }),
+            encodeTranscriptRecord({
+              type: "response_item",
+              timestamp: "2026-08-24T10:00:03.000Z",
+              payload: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Context noted" }],
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              timestamp: "2026-08-24T10:00:04.000Z",
+              payload: {
+                type: "token_count",
+                info: {
+                  last_token_usage: { total_tokens: 14_288 },
+                  model_context_window: 258_400,
+                },
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toHaveLength(1);
+        expect(page.descriptors[0]).toMatchObject({
+          source: "codex",
+          providerSessionId: "codex-ctx",
+          contextUsedTokens: 14_288,
+          contextMaxTokens: 258_400,
+        });
+        expect(page.descriptors[0]?.contextUsagePercent).toBeUndefined();
+      }),
+    );
+
+    it.effect("reads Claude assistant usage as contextUsedTokens without requiring max", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-claude-ctx-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-claude-ctx-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-claude-ctx-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-selected", "claude-ctx.jsonl"),
+          contents: [
+            encodeTranscriptRecord({
+              type: "user",
+              cwd: workspace,
+              sessionId: "claude-ctx",
+              timestamp: "2026-08-24T10:00:00.000Z",
+              message: { role: "user", content: "Meter Claude import context" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              sessionId: "claude-ctx",
+              timestamp: "2026-08-24T10:01:00.000Z",
+              message: {
+                role: "assistant",
+                model: "claude-sonnet-5",
+                content: [{ type: "text", text: "Noted" }],
+                usage: {
+                  input_tokens: 2,
+                  cache_creation_input_tokens: 6_988,
+                  cache_read_input_tokens: 19_460,
+                  output_tokens: 263,
+                },
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toHaveLength(1);
+        // Matches ClaudeAdapter active usage: input+cache(+output when no total_tokens).
+        expect(page.descriptors[0]).toMatchObject({
+          source: "claudeAgent",
+          providerSessionId: "claude-ctx",
+          contextUsedTokens: 2 + 6_988 + 19_460 + 263,
+        });
+        expect(page.descriptors[0]?.contextMaxTokens).toBeUndefined();
+        expect(page.descriptors[0]?.contextUsagePercent).toBeUndefined();
+      }),
+    );
+
+    it.effect("historyMode picks pre- vs post-compaction Claude usage for list context chips", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-claude-mode-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-claude-mode-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-claude-mode-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-selected", "claude-mode.jsonl"),
+          contents: [
+            encodeTranscriptRecord({
+              type: "user",
+              cwd: workspace,
+              sessionId: "claude-mode",
+              timestamp: "2026-08-24T10:00:00.000Z",
+              message: { role: "user", content: "Before compact" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              sessionId: "claude-mode",
+              timestamp: "2026-08-24T10:01:00.000Z",
+              message: {
+                role: "assistant",
+                model: "claude-sonnet-5",
+                content: [{ type: "text", text: "Big context" }],
+                usage: {
+                  input_tokens: 1,
+                  cache_creation_input_tokens: 80_000,
+                  cache_read_input_tokens: 20_000,
+                  output_tokens: 100,
+                },
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "user",
+              sessionId: "claude-mode",
+              timestamp: "2026-08-24T10:02:00.000Z",
+              isCompactSummary: true,
+              message: { role: "user", content: "Compact summary" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              sessionId: "claude-mode",
+              timestamp: "2026-08-24T10:03:00.000Z",
+              message: {
+                role: "assistant",
+                model: "claude-sonnet-5",
+                content: [{ type: "text", text: "Smaller context" }],
+                usage: {
+                  input_tokens: 1,
+                  cache_creation_input_tokens: 5_000,
+                  cache_read_input_tokens: 3_000,
+                  output_tokens: 50,
+                },
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+
+        const compacted = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+          historyMode: "compaction",
+        });
+        const full = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+          historyMode: "full",
+        });
+
+        expect(compacted.descriptors[0]?.contextUsedTokens).toBe(1 + 5_000 + 3_000 + 50);
+        expect(full.descriptors[0]?.contextUsedTokens).toBe(1 + 80_000 + 20_000 + 100);
+      }),
+    );
+
+    it.effect("ignores generic Cursor chat titles and titles from the first usable prompt", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-cursor-title-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-cursor-title-codex-");
+        const cursorHomePath = yield* makeTempDir("t3code-descriptor-cursor-title-home-");
+        const workspace = yield* makeTempDir("t3code-descriptor-cursor-title-workspace-");
+        const agentId = "77777777-7777-4777-8777-777777777777";
+        const slug = AgentSessionScanner.cursorProjectSlug(workspace);
+        const chatHash = AgentSessionScanner.cursorChatDirectoryHash(workspace);
+
+        yield* writeTranscript({
+          filePath: path.join(
+            cursorHomePath,
+            "projects",
+            slug,
+            "agent-transcripts",
+            agentId,
+            `${agentId}.jsonl`,
+          ),
+          contents: [
+            encodeTranscriptRecord({
+              role: "user",
+              message: {
+                content: [
+                  {
+                    type: "text",
+                    text: "<user_query>\nFix the Cursor import titles and keep mentions of recommended_plugins in the prompt body\n</user_query>",
+                  },
+                ],
+              },
+            }),
+            encodeTranscriptRecord({
+              role: "assistant",
+              message: {
+                content: [{ type: "text", text: "Titles now come from the first real prompt." }],
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+        yield* writeCursorChatMeta({
+          storeDbPath: path.join(cursorHomePath, "chats", chatHash, agentId, "store.db"),
+          meta: {
+            agentId,
+            name: "New Agent",
+            createdAt: Date.parse("2026-08-24T10:50:00.000Z"),
+          },
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          cursorHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toHaveLength(1);
+        expect(page.descriptors[0]?.title).toMatch(/Fix the Cursor import titles/);
+        expect(page.descriptors[0]?.title).not.toBe("New Agent");
+        expect(page.descriptors[0]?.promptPreview).toMatch(/Titles now come from the first real/);
+      }),
     );
 
     it.effect("does not title Codex sessions from leading recommended_plugins scaffolding", () =>

@@ -419,6 +419,7 @@ type ProjectSessionPage = {
 const listSessionsForProject = Effect.fn("listSessionsForProject")(function* (input: {
   readonly project: ListedSessionProject;
   readonly limit: number;
+  readonly historyMode: "compaction" | "full";
   readonly scanner: AgentSessionScanner.AgentSessionScanner["Service"];
   readonly snapshots: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
   readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
@@ -434,6 +435,7 @@ const listSessionsForProject = Effect.fn("listSessionsForProject")(function* (in
   const page = yield* input.scanner.listRecentSessionDescriptors(
     input.project.workspaceRoot,
     scanLimit,
+    { historyMode: input.historyMode },
   );
 
   const entries: Array<AgentSessionListResult["entries"][number]> = [];
@@ -560,6 +562,7 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const limit = input.limit ?? DEFAULT_SESSION_LIST_LIMIT;
+  const historyMode = input.historyMode ?? "compaction";
 
   const projects: ListedSessionProject[] = [];
   if (input.projectId !== undefined) {
@@ -598,6 +601,7 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
       yield* listSessionsForProject({
         project,
         limit,
+        historyMode,
         scanner,
         snapshots,
         directory,
@@ -722,7 +726,10 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
         return { threadId, created: false } satisfies AgentSessionAttachResult;
       }
 
-      const page = yield* scanner.listRecentSessionDescriptors(workspaceRoot, 10_000);
+      const historyMode = input.historyMode ?? "compaction";
+      const page = yield* scanner.listRecentSessionDescriptors(workspaceRoot, 10_000, {
+        historyMode,
+      });
       const matchingDescriptor = page.descriptors.find(
         (descriptor) =>
           descriptor.providerInstanceId === input.providerInstanceId &&
@@ -744,7 +751,6 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
         });
       }
 
-      const historyMode = input.historyMode ?? "compaction";
       const outcomes = yield* scanner.recentThreads(workspaceRoot, undefined, { historyMode }).pipe(
         Stream.runCollect,
         Effect.map((chunk) => Array.from(chunk)),

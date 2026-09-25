@@ -250,11 +250,12 @@ function ImportThreadSheet({
   );
 
   const listAtom = useMemo(() => {
+    const historyMode = useCompaction ? "compaction" : "full";
     if (!listEnvironmentId) return null;
     if (automatic) {
       return agentSessionList({
         environmentId: listEnvironmentId,
-        input: { limit },
+        input: { limit, historyMode },
       });
     }
     if (!selectedProject) return null;
@@ -264,9 +265,10 @@ function ImportThreadSheet({
         projectId: selectedProject.id,
         expectedWorkspaceRoot: selectedProject.workspaceRoot,
         limit,
+        historyMode,
       },
     });
-  }, [automatic, limit, listEnvironmentId, selectedProject]);
+  }, [automatic, limit, listEnvironmentId, selectedProject, useCompaction]);
 
   const listQuery = useEnvironmentQuery(listAtom);
   const attachSession = useAtomCommand(agentSessionAttach, { reportFailure: false });
@@ -380,13 +382,6 @@ function ImportThreadSheet({
               Attach a recent Claude, Codex, or Cursor session into this project.
             </label>
             <div className="flex flex-wrap items-center gap-3">
-              <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
-                <Checkbox
-                  checked={useCompaction}
-                  onCheckedChange={(checked) => setUseCompaction(checked === true)}
-                />
-                Use compacted chats
-              </label>
               <Menu>
                 <MenuTrigger
                   id="import-thread-project"
@@ -467,6 +462,13 @@ function ImportThreadSheet({
                   </MenuItem>
                 </MenuPopup>
               </Menu>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <Checkbox
+                  checked={useCompaction}
+                  onCheckedChange={(checked) => setUseCompaction(checked === true)}
+                />
+                Use compacted chats
+              </label>
             </div>
           </div>
 

@@ -171,8 +171,8 @@ export function isImportThreadRowDisabled(entry: AgentSessionEntry): boolean {
 }
 
 /**
- * Independent context chips for the import row: max, used, and native percent
- * each format on their own when present (no derived percent from used/max).
+ * Context chips for the import row. Prefer last-used tokens; only show max when
+ * used is absent. Native percent stands alone and is never derived from used/max.
  */
 export function formatImportThreadContextParts(
   entry: Pick<AgentSessionEntry, "contextMaxTokens" | "contextUsedTokens" | "contextUsagePercent">,
@@ -181,13 +181,13 @@ export function formatImportThreadContextParts(
   readonly usedLabel: string | null;
   readonly percentLabel: string | null;
 } {
-  const maxLabel =
-    entry.contextMaxTokens !== undefined
-      ? `${formatContextWindowTokens(entry.contextMaxTokens)} max`
-      : null;
   const usedLabel =
     entry.contextUsedTokens !== undefined
       ? `${formatContextWindowTokens(entry.contextUsedTokens)} used`
+      : null;
+  const maxLabel =
+    usedLabel === null && entry.contextMaxTokens !== undefined
+      ? `${formatContextWindowTokens(entry.contextMaxTokens)} max`
       : null;
   const percentLabel =
     entry.contextUsagePercent !== undefined ? `${Math.round(entry.contextUsagePercent)}%` : null;

@@ -114,10 +114,19 @@ export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
  * Raised in steps as the user asks for more history. Filtering stays client-side.
  * Omit `projectId` for Automatic: list recent sessions across every active project.
  */
+/** How much pre-compaction history to retain when attaching a session. */
+export const AgentSessionHistoryMode = Schema.Literals(["compaction", "full"]);
+export type AgentSessionHistoryMode = typeof AgentSessionHistoryMode.Type;
+
 export const AgentSessionListInput = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   limit: Schema.optional(PositiveInt),
+  /**
+   * Affects list polish for compacted sessions (e.g. which usage snapshot to
+   * show). Attach uses the same value when importing history.
+   */
+  historyMode: Schema.optional(AgentSessionHistoryMode),
 });
 export type AgentSessionListInput = typeof AgentSessionListInput.Type;
 
@@ -161,10 +170,6 @@ export const AgentSessionEntry = Schema.Struct({
   hasCompactionSummary: Schema.Boolean,
 });
 export type AgentSessionEntry = typeof AgentSessionEntry.Type;
-
-/** How much pre-compaction history to retain when attaching a session. */
-export const AgentSessionHistoryMode = Schema.Literals(["compaction", "full"]);
-export type AgentSessionHistoryMode = typeof AgentSessionHistoryMode.Type;
 
 export const AgentSessionProviderError = Schema.Struct({
   provider: AgentSessionSource,

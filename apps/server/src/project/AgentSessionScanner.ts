@@ -7,8 +7,9 @@
  * onboarding, without asking the user to browse the filesystem.
  *
  * Cursor stores project-scoped transcripts under `~/.cursor/projects/<slug>/`
- * and chat meta under `~/.cursor/chats/<md5>/`. Import lists those for a known
- * workspace root only — it never walks all of ~/.cursor.
+ * and chat meta under `~/.cursor/chats/<md5>/`. Context % comes from Cursor IDE
+ * `state.vscdb` (`composerData:<id>`), not chat store.db. Import lists those for
+ * a known workspace root only — it never walks all of ~/.cursor.
  *
  * The scan is read-only and best-effort: an unreadable home, a malformed
  * transcript, or a directory that has since been deleted is skipped rather
@@ -57,6 +58,7 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { readCursorComposerContextUsage } from "../provider/Layers/cursorComposerData.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -249,6 +251,7 @@ export class AgentSessionScanner extends Context.Service<
     readonly listRecentSessionDescriptors: (
       workspaceRoot: string,
       limit: number,
+      options?: { readonly historyMode?: "compaction" | "full" },
     ) => Effect.Effect<AgentSessionDescriptorPage, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -351,9 +354,11 @@ function isUsableListPreviewText(text: string): boolean {
     lower.startsWith("<runtime_info") ||
     lower.startsWith("<pull_request_linking") ||
     lower.startsWith("<recommended_plugins") ||
-    lower.includes("<recommended_plugins") ||
     lower.startsWith("# system") ||
-    lower.startsWith("you are ") ||
+    // System-persona dumps, not ordinary prompts like "You are reviewing…".
+    lower.startsWith("you are a ") ||
+    lower.startsWith("you are an ") ||
+    lower.startsWith("you are the ") ||
     (lower.includes("claude.md") && trimmed.length > 400)
   ) {
     return false;
@@ -361,6 +366,19 @@ function isUsableListPreviewText(text: string): boolean {
   const tagChars = (trimmed.match(/[<>]/g) ?? []).length;
   if (tagChars > 20 && tagChars / trimmed.length > 0.08) return false;
   return true;
+}
+
+/** Cursor IDE default titles — prefer the first real user prompt instead. */
+function isGenericCursorChatTitle(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return (
+    normalized.length === 0 ||
+    normalized === "new agent" ||
+    normalized === "new chat" ||
+    normalized === "untitled" ||
+    normalized === "agent" ||
+    normalized === "composer"
+  );
 }
 
 function truncatePreview(text: string, maxChars = 280): string {
@@ -386,12 +404,10 @@ interface CursorChatMeta {
   readonly name: string | null;
   readonly createdAtMs: number | null;
   readonly lastUpdatedAtMs: number | null;
-  /** Native percent from `composerData` — never invent used/max from this. */
-  readonly contextUsagePercent: number | null;
   readonly isSubagent: boolean;
 }
 
-/** Read title / usage / subagent flag from `chats/<md5>/<agentId>/store.db` without spawning cursor-agent. */
+/** Read title / timestamps / subagent flag from `chats/<md5>/<agentId>/store.db`. */
 function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
   try {
     const db = new NodeSqlite.DatabaseSync(storeDbPath, { readOnly: true });
@@ -412,9 +428,6 @@ function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
         readonly name?: unknown;
         readonly createdAt?: unknown;
         readonly lastUpdatedAt?: unknown;
-        readonly composerData?: {
-          readonly contextUsagePercent?: unknown;
-        };
         readonly subagentInfo?: unknown;
       };
       const name =
@@ -429,19 +442,10 @@ function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
         typeof parsed.lastUpdatedAt === "number" && Number.isFinite(parsed.lastUpdatedAt)
           ? parsed.lastUpdatedAt
           : null;
-      const rawPercent = parsed.composerData?.contextUsagePercent;
-      const contextUsagePercent =
-        typeof rawPercent === "number" &&
-        Number.isFinite(rawPercent) &&
-        rawPercent >= 0 &&
-        rawPercent <= 100
-          ? rawPercent
-          : null;
       return {
         name,
         createdAtMs,
         lastUpdatedAtMs,
-        contextUsagePercent,
         isSubagent: parsed.subagentInfo != null,
       };
     } finally {
@@ -450,6 +454,116 @@ function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
   } catch {
     return null;
   }
+}
+
+function nonNegativeInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : null;
+}
+
+function positiveInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : null;
+}
+
+/**
+ * Codex context fill from rollout JSONL. Prefer `token_count` (used + max);
+ * `token_usage_record` / `task_started` fill gaps. Never invents a percent.
+ */
+function extractCodexContextFields(parsed: Record<string, unknown>): {
+  readonly contextUsedTokens: number | null;
+  readonly contextMaxTokens: number | null;
+} {
+  const empty = { contextUsedTokens: null, contextMaxTokens: null } as const;
+  const payload = parsed.payload;
+  if (typeof payload !== "object" || payload === null) return empty;
+  const body = payload as Record<string, unknown>;
+
+  if (parsed.type === "token_usage_record") {
+    const usage = body.usage;
+    if (typeof usage !== "object" || usage === null) return empty;
+    return {
+      contextUsedTokens: nonNegativeInt((usage as Record<string, unknown>).total_tokens),
+      contextMaxTokens: null,
+    };
+  }
+
+  if (parsed.type !== "event_msg") return empty;
+
+  if (body.type === "task_started") {
+    return {
+      contextUsedTokens: null,
+      contextMaxTokens: positiveInt(body.model_context_window),
+    };
+  }
+
+  if (body.type !== "token_count") return empty;
+  const info = body.info;
+  if (typeof info !== "object" || info === null) return empty;
+  const infoRecord = info as Record<string, unknown>;
+  const last = infoRecord.last_token_usage;
+  const used =
+    typeof last === "object" && last !== null
+      ? nonNegativeInt((last as Record<string, unknown>).total_tokens)
+      : null;
+  return {
+    contextUsedTokens: used,
+    contextMaxTokens: positiveInt(infoRecord.model_context_window),
+  };
+}
+
+/**
+ * Claude active-context tokens from an assistant message, matching
+ * ClaudeAdapter's input+cache(+output/total) active usage calc. Sidechains
+ * skipped. Max window is rarely on disk — used alone is enough for the list.
+ */
+function extractClaudeContextUsedTokens(parsed: Record<string, unknown>): number | null {
+  if (parsed.type !== "assistant" || parsed.isSidechain === true) return null;
+  const message = parsed.message;
+  if (typeof message !== "object" || message === null) return null;
+  const usage = (message as Record<string, unknown>).usage;
+  if (typeof usage !== "object" || usage === null) return null;
+  const usageRecord = usage as Record<string, unknown>;
+  const iterations = Array.isArray(usageRecord.iterations) ? usageRecord.iterations : [];
+  const active =
+    [...iterations]
+      .reverse()
+      .find(
+        (iteration): iteration is Record<string, unknown> =>
+          iteration !== null && typeof iteration === "object" && !Array.isArray(iteration),
+      ) ?? usageRecord;
+  const inputTokens =
+    (nonNegativeInt(active.input_tokens) ?? 0) +
+    (nonNegativeInt(active.cache_creation_input_tokens) ?? 0) +
+    (nonNegativeInt(active.cache_read_input_tokens) ?? 0);
+  const outputTokens = nonNegativeInt(active.output_tokens) ?? 0;
+  const explicitTotal = nonNegativeInt(active.total_tokens);
+  const activeTokens =
+    explicitTotal !== null && explicitTotal > 0 ? explicitTotal : inputTokens + outputTokens;
+  return activeTokens > 0 ? activeTokens : null;
+}
+
+/**
+ * Pick used tokens for the list row under the current history mode.
+ * Compaction → last post-summary usage when a compact summary exists;
+ * full → last pre-summary usage (peak of the retained full history).
+ */
+function selectContextUsedForHistoryMode(input: {
+  readonly historyMode: "compaction" | "full";
+  readonly hasCompactionSummary: boolean;
+  readonly usedBeforeCompaction: number | null;
+  readonly usedAfterCompaction: number | null;
+}): number | null {
+  const { historyMode, hasCompactionSummary, usedBeforeCompaction, usedAfterCompaction } = input;
+  if (!hasCompactionSummary) {
+    return usedAfterCompaction ?? usedBeforeCompaction;
+  }
+  if (historyMode === "compaction") {
+    return usedAfterCompaction ?? usedBeforeCompaction;
+  }
+  return usedBeforeCompaction ?? usedAfterCompaction;
 }
 
 function normalizeTimestamp(value: string | undefined, fallback: string): string {
@@ -764,6 +878,8 @@ function extractDescriptorFields(
   readonly title: string | null;
   readonly timestamp: string | null;
   readonly isCompactSummary: boolean;
+  readonly contextUsedTokens: number | null;
+  readonly contextMaxTokens: number | null;
 } {
   const empty = {
     cwd: null,
@@ -773,6 +889,8 @@ function extractDescriptorFields(
     title: null,
     timestamp: null,
     isCompactSummary: false,
+    contextUsedTokens: null,
+    contextMaxTokens: null,
   } as const;
   let parsed: unknown;
   try {
@@ -805,7 +923,17 @@ function extractDescriptorFields(
       const text = extractText(record.message?.content);
       if (isUsableListPreviewText(text)) assistantPreview = text;
     }
-    return { cwd, sessionId, prompt, assistantPreview, title: null, timestamp, isCompactSummary };
+    return {
+      cwd,
+      sessionId,
+      prompt,
+      assistantPreview,
+      title: null,
+      timestamp,
+      isCompactSummary,
+      contextUsedTokens: null,
+      contextMaxTokens: null,
+    };
   }
   if (source === "claudeAgent") {
     const sessionId = record.sessionId?.trim() || null;
@@ -821,8 +949,19 @@ function extractDescriptorFields(
         if (isUsableListPreviewText(text)) assistantPreview = text;
       }
     }
-    return { cwd, sessionId, prompt, assistantPreview, title, timestamp, isCompactSummary };
+    return {
+      cwd,
+      sessionId,
+      prompt,
+      assistantPreview,
+      title,
+      timestamp,
+      isCompactSummary,
+      contextUsedTokens: extractClaudeContextUsedTokens(parsed as Record<string, unknown>),
+      contextMaxTokens: null,
+    };
   }
+  const context = extractCodexContextFields(parsed as Record<string, unknown>);
   let sessionId: string | null = null;
   if (record.type === "session_meta") {
     sessionId = record.payload?.id?.trim() || record.payload?.session_id?.trim() || null;
@@ -840,7 +979,17 @@ function extractDescriptorFields(
       if (isUsableListPreviewText(text)) assistantPreview = text;
     }
   }
-  return { cwd, sessionId, prompt, assistantPreview, title: null, timestamp, isCompactSummary };
+  return {
+    cwd,
+    sessionId,
+    prompt,
+    assistantPreview,
+    title: null,
+    timestamp,
+    isCompactSummary,
+    contextUsedTokens: context.contextUsedTokens,
+    contextMaxTokens: context.contextMaxTokens,
+  };
 }
 
 function shouldRetainDecodedRecord(
@@ -1154,6 +1303,7 @@ export const make = Effect.gen(function* () {
   const readDescriptorMeta = Effect.fn("AgentSessionScanner.readDescriptorMeta")(function* (
     source: AgentSessionSource,
     transcript: TranscriptCandidate & { readonly mtimeMs: number },
+    historyMode: "compaction" | "full" = "compaction",
   ) {
     if (transcript.size === 0) return null;
     const fallbackSessionId = path.basename(transcript.filePath, ".jsonl");
@@ -1173,6 +1323,9 @@ export const make = Effect.gen(function* () {
             let firstTimestamp: string | null = null;
             let lastTimestamp: string | null = null;
             let hasCompactionSummary = false;
+            let usedBeforeCompaction: number | null = null;
+            let usedAfterCompaction: number | null = null;
+            let contextMaxTokens: number | null = null;
             const maxBytes = Math.min(MAX_TRANSCRIPT_SCAN_BYTES, transcript.size);
 
             const consider = (line: string) => {
@@ -1184,6 +1337,14 @@ export const make = Effect.gen(function* () {
               if (fields.prompt !== null && prompt === null) prompt = fields.prompt;
               if (fields.assistantPreview !== null) assistantPreview = fields.assistantPreview;
               if (fields.isCompactSummary) hasCompactionSummary = true;
+              if (fields.contextMaxTokens !== null) contextMaxTokens = fields.contextMaxTokens;
+              if (fields.contextUsedTokens !== null) {
+                if (hasCompactionSummary) {
+                  usedAfterCompaction = fields.contextUsedTokens;
+                } else {
+                  usedBeforeCompaction = fields.contextUsedTokens;
+                }
+              }
               if (fields.timestamp !== null) {
                 const normalized = normalizeTimestamp(fields.timestamp, fallbackTimestamp);
                 if (firstTimestamp === null) firstTimestamp = normalized;
@@ -1218,18 +1379,31 @@ export const make = Effect.gen(function* () {
             // Prefer the last assistant reply for the list preview. The forward
             // window often stops at the first reply; the tail read catches the
             // latest usable agent text when the file is large enough to seek.
-            const tail = yield* readDescriptorTail(source, transcript);
+            const tail = yield* readDescriptorTail(source, transcript, hasCompactionSummary);
             if (tail.assistantPreview !== null) assistantPreview = tail.assistantPreview;
             if (tail.lastTimestamp !== null) {
               lastTimestamp = normalizeTimestamp(tail.lastTimestamp, fallbackTimestamp);
             }
             if (tail.hasCompactionSummary) hasCompactionSummary = true;
+            if (tail.usedBeforeCompaction !== null) {
+              usedBeforeCompaction = tail.usedBeforeCompaction;
+            }
+            if (tail.usedAfterCompaction !== null) {
+              usedAfterCompaction = tail.usedAfterCompaction;
+            }
+            if (tail.contextMaxTokens !== null) contextMaxTokens = tail.contextMaxTokens;
 
             if (sessionId.length === 0) return null;
             // Last agent response when we have one; otherwise the first usable
             // user prompt (system dumps already filtered by isUsableListPreviewText).
             const previewSource = assistantPreview ?? prompt;
             if (previewSource === null) return null;
+            const contextUsedTokens = selectContextUsedForHistoryMode({
+              historyMode,
+              hasCompactionSummary,
+              usedBeforeCompaction,
+              usedAfterCompaction,
+            });
             return {
               providerSessionId: sessionId,
               promptPreview: truncatePreview(previewSource),
@@ -1237,6 +1411,8 @@ export const make = Effect.gen(function* () {
               createdAt: firstTimestamp ?? fallbackTimestamp,
               lastMessageAt: lastTimestamp ?? firstTimestamp ?? fallbackTimestamp,
               hasCompactionSummary,
+              ...(contextUsedTokens !== null ? { contextUsedTokens } : {}),
+              ...(contextMaxTokens !== null ? { contextMaxTokens } : {}),
             };
           }),
         ),
@@ -1251,11 +1427,15 @@ export const make = Effect.gen(function* () {
   const readDescriptorTail = Effect.fn("AgentSessionScanner.readDescriptorTail")(function* (
     source: AgentSessionSource,
     transcript: TranscriptCandidate & { readonly mtimeMs: number },
+    alreadySawCompaction: boolean,
   ) {
     const empty = {
       assistantPreview: null as string | null,
       lastTimestamp: null as string | null,
       hasCompactionSummary: false,
+      usedBeforeCompaction: null as number | null,
+      usedAfterCompaction: null as number | null,
+      contextMaxTokens: null as number | null,
     };
     const tailByteCount = Math.min(METADATA_READ_BYTES * 4, transcript.size);
     if (tailByteCount <= 0) return empty;
@@ -1274,6 +1454,10 @@ export const make = Effect.gen(function* () {
             let assistantPreview: string | null = null;
             let lastTimestamp: string | null = null;
             let hasCompactionSummary = false;
+            let sawCompaction = alreadySawCompaction;
+            let usedBeforeCompaction: number | null = null;
+            let usedAfterCompaction: number | null = null;
+            let contextMaxTokens: number | null = null;
             // First line may be a partial JSONL record after the seek.
             for (let index = 1; index < lines.length; index++) {
               const trimmed = lines[index]?.trim() ?? "";
@@ -1281,9 +1465,27 @@ export const make = Effect.gen(function* () {
               const fields = extractDescriptorFields(source, trimmed);
               if (fields.assistantPreview !== null) assistantPreview = fields.assistantPreview;
               if (fields.timestamp !== null) lastTimestamp = fields.timestamp;
-              if (fields.isCompactSummary) hasCompactionSummary = true;
+              if (fields.isCompactSummary) {
+                hasCompactionSummary = true;
+                sawCompaction = true;
+              }
+              if (fields.contextMaxTokens !== null) contextMaxTokens = fields.contextMaxTokens;
+              if (fields.contextUsedTokens !== null) {
+                if (sawCompaction) {
+                  usedAfterCompaction = fields.contextUsedTokens;
+                } else {
+                  usedBeforeCompaction = fields.contextUsedTokens;
+                }
+              }
             }
-            return { assistantPreview, lastTimestamp, hasCompactionSummary };
+            return {
+              assistantPreview,
+              lastTimestamp,
+              hasCompactionSummary,
+              usedBeforeCompaction,
+              usedAfterCompaction,
+              contextMaxTokens,
+            };
           }),
         ),
       ),
@@ -1758,6 +1960,11 @@ export const make = Effect.gen(function* () {
           const chatMeta = readCursorChatMeta(storeDbPath);
           if (chatMeta?.isSubagent === true) continue;
 
+          // Native % lives in Cursor IDE global state.vscdb, not chats/*/store.db.
+          const composerUsage = readCursorComposerContextUsage(trimmedId, {
+            env: hostEnvironment,
+          });
+
           const stats = yield* statOption(filePath);
           if (
             Option.isNone(stats) ||
@@ -1772,13 +1979,15 @@ export const make = Effect.gen(function* () {
             mtimeMs: stats.value.mtime.value.getTime(),
             providerInstanceId: home.providerInstanceId,
             size: Number(stats.value.size),
-            ...(chatMeta?.name ? { titleOverride: chatMeta.name } : {}),
+            ...(chatMeta?.name && !isGenericCursorChatTitle(chatMeta.name)
+              ? { titleOverride: chatMeta.name }
+              : {}),
             ...(chatMeta?.createdAtMs != null ? { createdAtMs: chatMeta.createdAtMs } : {}),
             ...(chatMeta?.lastUpdatedAtMs != null
               ? { lastUpdatedAtMs: chatMeta.lastUpdatedAtMs }
               : {}),
-            ...(chatMeta?.contextUsagePercent != null
-              ? { contextUsagePercent: chatMeta.contextUsagePercent }
+            ...(composerUsage != null
+              ? { contextUsagePercent: composerUsage.contextUsagePercent }
               : {}),
             cwd: root,
           });
@@ -2173,7 +2382,9 @@ export const make = Effect.gen(function* () {
     Effect.fn("AgentSessionScanner.listRecentSessionDescriptors")(function* (
       workspaceRoot: string,
       limit: number,
+      options?: { readonly historyMode?: "compaction" | "full" },
     ) {
+      const historyMode = options?.historyMode ?? "compaction";
       const root = path.resolve(expandHomePath(workspaceRoot));
       const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
       if (isExcludedProjectPath(root) || isExcludedProjectPath(realRoot)) {
@@ -2293,12 +2504,16 @@ export const make = Effect.gen(function* () {
         const stats = yield* statOption(transcript.filePath);
         if (Option.isNone(stats) || stats.value.type !== "File") continue;
         const fileSize = Number(stats.value.size);
-        const meta = yield* readDescriptorMeta(candidate.source, {
-          filePath: transcript.filePath,
-          mtimeMs: transcript.mtimeMs,
-          providerInstanceId: candidate.providerInstanceId,
-          size: fileSize,
-        });
+        const meta = yield* readDescriptorMeta(
+          candidate.source,
+          {
+            filePath: transcript.filePath,
+            mtimeMs: transcript.mtimeMs,
+            providerInstanceId: candidate.providerInstanceId,
+            size: fileSize,
+          },
+          historyMode,
+        );
         if (meta === null) continue;
 
         const lastActiveAt = DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs));
@@ -2337,6 +2552,12 @@ export const make = Effect.gen(function* () {
           lastMessageAt,
           ...(transcript.contextUsagePercent != null
             ? { contextUsagePercent: transcript.contextUsagePercent }
+            : {}),
+          ...(meta.contextUsedTokens !== undefined
+            ? { contextUsedTokens: meta.contextUsedTokens }
+            : {}),
+          ...(meta.contextMaxTokens !== undefined
+            ? { contextMaxTokens: meta.contextMaxTokens }
             : {}),
           importable,
           ...(importable ? {} : { importBlockedReason: oversizedReason }),
