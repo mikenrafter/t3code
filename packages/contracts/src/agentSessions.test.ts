@@ -107,13 +107,31 @@ describe("AgentSessionListResult", () => {
     expect(() => decodeListResult({ entries: [entry] })).toThrow();
   });
 
-  it("rejects entries from providers the scanner cannot read in v1", () => {
+  it("accepts cursor sessions discovered from ~/.cursor project transcripts", () => {
+    const result = decodeListResult({
+      entries: [{ ...entry, provider: "cursor", providerInstanceId: "cursor" }],
+      providerErrors: [],
+    });
+
+    expect(result.entries[0]?.provider).toBe("cursor");
+  });
+
+  it("rejects entries from providers the scanner cannot read", () => {
     expect(() =>
       decodeListResult({
         entries: [{ ...entry, provider: "cursorAgent" }],
         providerErrors: [],
       }),
     ).toThrow();
+  });
+
+  it("accepts a count of sessions omitted because they are already in T3", () => {
+    const result = decodeListResult({
+      entries: [],
+      providerErrors: [],
+      filteredAlreadyImportedCount: 4,
+    });
+    expect(result.filteredAlreadyImportedCount).toBe(4);
   });
 
   it("reports a per-provider failure beside the entries that did load", () => {

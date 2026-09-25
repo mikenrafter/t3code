@@ -6,6 +6,10 @@
  * values gives us the set of directories worth offering as projects during
  * onboarding, without asking the user to browse the filesystem.
  *
+ * Cursor stores project-scoped transcripts under `~/.cursor/projects/<slug>/`
+ * and chat meta under `~/.cursor/chats/<md5>/`. Import lists those for a known
+ * workspace root only — it never walks all of ~/.cursor.
+ *
  * The scan is read-only and best-effort: an unreadable home, a malformed
  * transcript, or a directory that has since been deleted is skipped rather
  * than failing the scan. Project creation stays with the client, which
@@ -13,7 +17,9 @@
  *
  * @module project/AgentSessionScanner
  */
+import { createHash } from "node:crypto";
 import * as NodeOS from "node:os";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   AgentSessionScanError,
@@ -113,6 +119,8 @@ const CodexTurnMetadata = Schema.Struct({
 
 const TranscriptRecord = Schema.Struct({
   type: Schema.optional(Schema.String),
+  /** Cursor agent-transcript JSONL stores role at the top level. */
+  role: Schema.optional(Schema.String),
   timestamp: Schema.optional(Schema.String),
   cwd: Schema.optional(Schema.String),
   sessionId: Schema.optional(Schema.String),
@@ -245,6 +253,8 @@ interface RawCandidate {
   readonly transcripts: ReadonlyArray<{
     readonly filePath: string;
     readonly mtimeMs: number | null;
+    /** Cursor chat meta `name`, when the store.db row is readable. */
+    readonly titleOverride?: string;
   }>;
 }
 
@@ -300,6 +310,109 @@ function extractText(
     .map((block) => block.text?.trim() ?? "")
     .filter((text) => text.length > 0)
     .join("\n");
+}
+
+/** Cursor wraps the live prompt in `<user_query>`; list/import should show the inner text. */
+function stripUserQueryWrapper(text: string): string {
+  const match = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/i.exec(text);
+  const inner = match?.[1]?.trim();
+  return inner && inner.length > 0 ? inner : text.trim();
+}
+
+/**
+ * Skip the huge system / environment dumps CLIs sometimes write as the first
+ * "user" record so Import previews stay legible. Real prompts are usually short
+ * and not mostly XML scaffolding.
+ */
+function isUsableListPreviewText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+  if (trimmed.length > 1_500) return false;
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith("<user_info") ||
+    lower.startsWith("<system") ||
+    lower.startsWith("<environment") ||
+    lower.startsWith("<agent_transcripts") ||
+    lower.startsWith("<runtime_info") ||
+    lower.startsWith("<pull_request_linking") ||
+    lower.startsWith("# system") ||
+    lower.startsWith("you are ") ||
+    (lower.includes("claude.md") && trimmed.length > 400)
+  ) {
+    return false;
+  }
+  const tagChars = (trimmed.match(/[<>]/g) ?? []).length;
+  if (tagChars > 20 && tagChars / trimmed.length > 0.08) return false;
+  return true;
+}
+
+function truncatePreview(text: string, maxChars = 280): string {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+/**
+ * Cursor project folder name for a cwd: `/a/b` → `a-b`. Matches the IDE/CLI layout under
+ * `~/.cursor/projects/<slug>/agent-transcripts`.
+ */
+export function cursorProjectSlug(cwd: string): string {
+  return cwd.replaceAll("\\", "/").replace(/^\//, "").replaceAll("/", "-");
+}
+
+/** Cursor chat meta directory key: `md5(cwd)` under `~/.cursor/chats`. */
+export function cursorChatDirectoryHash(cwd: string): string {
+  return createHash("md5").update(cwd).digest("hex");
+}
+
+interface CursorChatMeta {
+  readonly name: string | null;
+  readonly createdAtMs: number | null;
+  readonly isSubagent: boolean;
+}
+
+/** Read title / subagent flag from `chats/<md5>/<agentId>/store.db` without spawning cursor-agent. */
+function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
+  try {
+    const db = new DatabaseSync(storeDbPath, { readOnly: true });
+    try {
+      const row = db.prepare("SELECT value FROM meta WHERE key = ?").get("0") as
+        | { readonly value: string | Uint8Array }
+        | undefined;
+      if (row === undefined) return null;
+      const raw =
+        typeof row.value === "string" ? row.value : Buffer.from(row.value).toString("utf8");
+      let jsonText: string;
+      try {
+        jsonText = Buffer.from(raw, "hex").toString("utf8");
+      } catch {
+        jsonText = raw;
+      }
+      const parsed = JSON.parse(jsonText) as {
+        readonly name?: unknown;
+        readonly createdAt?: unknown;
+        readonly subagentInfo?: unknown;
+      };
+      const name =
+        typeof parsed.name === "string" && parsed.name.trim().length > 0
+          ? parsed.name.trim()
+          : null;
+      const createdAtMs =
+        typeof parsed.createdAt === "number" && Number.isFinite(parsed.createdAt)
+          ? parsed.createdAt
+          : null;
+      return {
+        name,
+        createdAtMs,
+        isSubagent: parsed.subagentInfo != null,
+      };
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 function normalizeTimestamp(value: string | undefined, fallback: string): string {
@@ -432,6 +545,24 @@ function parseAgentSessionRecords(
   let recordIndex = -1;
   for (const record of records) {
     recordIndex += 1;
+    if (input.source === "cursor") {
+      const role =
+        record.role === "user" || record.role === "assistant"
+          ? record.role
+          : record.message?.role === "user" || record.message?.role === "assistant"
+            ? record.message.role
+            : null;
+      if (role === null) continue;
+      const text = stripUserQueryWrapper(extractText(record.message?.content));
+      if (text.length === 0) continue;
+      retainMessage({
+        role,
+        text,
+        createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
+        codexResponseUser: false,
+      });
+      continue;
+    }
     if (input.source === "claudeAgent") {
       if (
         record.isSidechain === true ||
@@ -548,7 +679,7 @@ function extractDecodedCwd(record: DecodedTranscriptRecord): string | null {
   return cwd && cwd.length > 0 ? cwd : null;
 }
 
-/** Session id / first prompt / title from one JSONL record, for cheap list rows. */
+/** Session id / first usable prompt / last assistant / title from one JSONL record. */
 function extractDescriptorFields(
   source: AgentSessionSource,
   line: string,
@@ -556,9 +687,16 @@ function extractDescriptorFields(
   readonly cwd: string | null;
   readonly sessionId: string | null;
   readonly prompt: string | null;
+  readonly assistantPreview: string | null;
   readonly title: string | null;
 } {
-  const empty = { cwd: null, sessionId: null, prompt: null, title: null } as const;
+  const empty = {
+    cwd: null,
+    sessionId: null,
+    prompt: null,
+    assistantPreview: null,
+    title: null,
+  } as const;
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -568,38 +706,59 @@ function extractDescriptorFields(
   if (typeof parsed !== "object" || parsed === null) return empty;
   const record = parsed as DecodedTranscriptRecord;
   const cwd = extractDecodedCwd(record);
+  if (source === "cursor") {
+    const sessionId = record.sessionId?.trim() || null;
+    let prompt: string | null = null;
+    let assistantPreview: string | null = null;
+    const role =
+      record.role === "user" || record.role === "assistant"
+        ? record.role
+        : record.message?.role === "user" || record.message?.role === "assistant"
+          ? record.message.role
+          : null;
+    if (role === "user") {
+      const text = stripUserQueryWrapper(extractText(record.message?.content));
+      if (isUsableListPreviewText(text)) prompt = text;
+    } else if (role === "assistant") {
+      const text = extractText(record.message?.content);
+      if (isUsableListPreviewText(text)) assistantPreview = text;
+    }
+    return { cwd, sessionId, prompt, assistantPreview, title: null };
+  }
   if (source === "claudeAgent") {
     const sessionId = record.sessionId?.trim() || null;
     const title = record.aiTitle?.trim() || null;
     let prompt: string | null = null;
-    if (
-      record.type === "user" &&
-      record.isSidechain !== true &&
-      record.isMeta !== true &&
-      record.isCompactSummary !== true
-    ) {
-      const text = extractText(record.message?.content);
-      if (text.length > 0) prompt = text;
+    let assistantPreview: string | null = null;
+    if (record.isSidechain !== true && record.isMeta !== true && record.isCompactSummary !== true) {
+      if (record.type === "user") {
+        const text = extractText(record.message?.content);
+        if (isUsableListPreviewText(text)) prompt = text;
+      } else if (record.type === "assistant") {
+        const text = extractText(record.message?.content);
+        if (isUsableListPreviewText(text)) assistantPreview = text;
+      }
     }
-    return { cwd, sessionId, prompt, title };
+    return { cwd, sessionId, prompt, assistantPreview, title };
   }
   let sessionId: string | null = null;
   if (record.type === "session_meta") {
     sessionId = record.payload?.id?.trim() || record.payload?.session_id?.trim() || null;
   }
   let prompt: string | null = null;
+  let assistantPreview: string | null = null;
   if (record.type === "event_msg" && record.payload?.type === "user_message") {
     const text = record.payload.message?.trim() ?? "";
-    if (text.length > 0) prompt = text;
-  } else if (
-    record.type === "response_item" &&
-    record.payload?.type === "message" &&
-    record.payload.role === "user"
-  ) {
+    if (isUsableListPreviewText(text)) prompt = text;
+  } else if (record.type === "response_item" && record.payload?.type === "message") {
     const text = extractText(record.payload.content);
-    if (text.length > 0) prompt = text;
+    if (record.payload.role === "user") {
+      if (isUsableListPreviewText(text)) prompt = text;
+    } else if (record.payload.role === "assistant") {
+      if (isUsableListPreviewText(text)) assistantPreview = text;
+    }
   }
-  return { cwd, sessionId, prompt, title: null };
+  return { cwd, sessionId, prompt, assistantPreview, title: null };
 }
 
 function shouldRetainDecodedRecord(
@@ -607,6 +766,11 @@ function shouldRetainDecodedRecord(
   record: DecodedTranscriptRecord,
 ): boolean {
   if (extractDecodedCwd(record) !== null) return true;
+  if (source === "cursor") {
+    return (
+      record.role === "user" || record.role === "assistant" || record.message?.content !== undefined
+    );
+  }
   if (source === "claudeAgent") {
     return (
       record.type === "user" ||
@@ -920,6 +1084,7 @@ export const make = Effect.gen(function* () {
             let recordsRead = 0;
             let sessionId = source === "codex" ? "" : fallbackSessionId;
             let prompt: string | null = null;
+            let assistantPreview: string | null = null;
             let title: string | null = null;
             const maxBytes = Math.min(MAX_TRANSCRIPT_SCAN_BYTES, transcript.size);
 
@@ -930,11 +1095,14 @@ export const make = Effect.gen(function* () {
               }
               if (fields.title !== null) title = fields.title;
               if (fields.prompt !== null && prompt === null) prompt = fields.prompt;
+              if (fields.assistantPreview !== null) assistantPreview = fields.assistantPreview;
+              // Keep scanning while we still need a usable user prompt; assistant
+              // text can keep updating until the forward budget ends.
               return sessionId.length > 0 && prompt !== null;
             };
 
             while (bytesRead < maxBytes) {
-              if (recordsRead >= MAX_METADATA_RECORDS_PER_TRANSCRIPT) return null;
+              if (recordsRead >= MAX_METADATA_RECORDS_PER_TRANSCRIPT) break;
               const readSize = Math.min(METADATA_READ_BYTES, maxBytes - bytesRead);
               const next = yield* file.readAlloc(readSize);
               if (Option.isNone(next)) break;
@@ -946,15 +1114,13 @@ export const make = Effect.gen(function* () {
                 const trimmed = line.trim();
                 if (trimmed.length === 0) continue;
                 recordsRead += 1;
-                if (consider(trimmed)) {
-                  return {
-                    providerSessionId: sessionId,
-                    promptPreview: prompt!,
-                    title: title ?? prompt!,
-                  };
+                if (consider(trimmed) && assistantPreview !== null) {
+                  // Have both a usable user prompt and an assistant preview.
+                  break;
                 }
-                if (recordsRead >= MAX_METADATA_RECORDS_PER_TRANSCRIPT) return null;
+                if (recordsRead >= MAX_METADATA_RECORDS_PER_TRANSCRIPT) break;
               }
+              if (sessionId.length > 0 && prompt !== null && assistantPreview !== null) break;
             }
 
             const last = (remaining + decoder.decode()).trim();
@@ -963,17 +1129,62 @@ export const make = Effect.gen(function* () {
               consider(last);
             }
 
-            if (sessionId.length === 0 || prompt === null) return null;
+            // Prefer the last assistant reply for the list preview. The forward
+            // window often stops at the first reply; the tail read catches the
+            // latest usable agent text when the file is large enough to seek.
+            const tailAssistant = yield* readDescriptorTailAssistant(source, transcript);
+            if (tailAssistant !== null) assistantPreview = tailAssistant;
+
+            if (sessionId.length === 0) return null;
+            // Last agent response when we have one; otherwise the first usable
+            // user prompt (system dumps already filtered by isUsableListPreviewText).
+            const previewSource = assistantPreview ?? prompt;
+            if (previewSource === null) return null;
             return {
               providerSessionId: sessionId,
-              promptPreview: prompt,
-              title: title ?? prompt,
+              promptPreview: truncatePreview(previewSource),
+              title: truncatePreview(title ?? prompt ?? previewSource, 120),
             };
           }),
         ),
       ),
     ).pipe(Effect.orElseSucceed(() => null));
   });
+
+  /** Last usable assistant text from the end of a transcript, bounded. */
+  const readDescriptorTailAssistant = Effect.fn("AgentSessionScanner.readDescriptorTailAssistant")(
+    function* (
+      source: AgentSessionSource,
+      transcript: TranscriptCandidate & { readonly mtimeMs: number },
+    ) {
+      const tailByteCount = Math.min(METADATA_READ_BYTES * 4, transcript.size);
+      if (tailByteCount <= 0) return null;
+      // Effect's File.seek tracks position as bigint; pass bigint offsets.
+      const size = BigInt(transcript.size);
+      const tailBytes = BigInt(tailByteCount);
+      return yield* Effect.scoped(
+        fileSystem.open(transcript.filePath, { flag: "r" }).pipe(
+          Effect.flatMap((file) =>
+            Effect.gen(function* () {
+              yield* file.seek(size - tailBytes, "start");
+              const chunk = yield* file.readAlloc(tailByteCount);
+              if (Option.isNone(chunk)) return null;
+              const text = new TextDecoder().decode(chunk.value);
+              const lines = text.split("\n");
+              // First line may be a partial JSONL record after the seek.
+              for (let index = lines.length - 1; index >= 1; index--) {
+                const trimmed = lines[index]?.trim() ?? "";
+                if (trimmed.length === 0) continue;
+                const fields = extractDescriptorFields(source, trimmed);
+                if (fields.assistantPreview !== null) return fields.assistantPreview;
+              }
+              return null;
+            }),
+          ),
+        ),
+      ).pipe(Effect.orElseSucceed(() => null));
+    },
+  );
 
   /**
    * Project history fields while reading, before allocating whole JSON records.
@@ -1288,17 +1499,28 @@ export const make = Effect.gen(function* () {
     const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
     const seenHomes = new Set<string>();
     for (const { instanceId, config: instance } of instances) {
-      const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-      const environmentHome =
-        instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
-        hostEnvironment[homeVariable];
-
       let homePath: string;
-      if (source === "claudeAgent") {
+      if (source === "cursor") {
+        // Listing reads ~/.cursor (or CURSOR_HOME). CursorSettings has no homePath;
+        // we never spawn cursor-agent just to discover transcripts.
+        const fromEnvironment = hostEnvironment.CURSOR_HOME?.trim() ?? "";
+        homePath =
+          fromEnvironment.length > 0
+            ? path.resolve(expandHomePath(fromEnvironment))
+            : path.join(NodeOS.homedir(), ".cursor");
+      } else if (source === "claudeAgent") {
+        const homeVariable = "CLAUDE_CONFIG_DIR";
+        const environmentHome =
+          instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
+          hostEnvironment[homeVariable];
         const config = decodeClaudeSettings(instance.config ?? {});
         if (Option.isNone(config)) continue;
         homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
       } else {
+        const homeVariable = "CODEX_HOME";
+        const environmentHome =
+          instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
+          hostEnvironment[homeVariable];
         const config = decodeCodexSettings(instance.config ?? {});
         if (Option.isNone(config)) continue;
         const codexSettings =
@@ -1318,7 +1540,101 @@ export const make = Effect.gen(function* () {
       seenHomes.add(homeKey);
       homes.push({ homePath, providerInstanceId: instanceId });
     }
+
+    // Cursor history import is filesystem-only. When the provider is disabled,
+    // still offer ~/.cursor sessions under the built-in instance id so Import
+    // works without turning the live adapter on.
+    if (source === "cursor" && homes.length === 0) {
+      const fromEnvironment = hostEnvironment.CURSOR_HOME?.trim() ?? "";
+      homes.push({
+        homePath:
+          fromEnvironment.length > 0
+            ? path.resolve(expandHomePath(fromEnvironment))
+            : path.join(NodeOS.homedir(), ".cursor"),
+        providerInstanceId: ProviderInstanceId.make("cursor"),
+      });
+    }
     return homes;
+  });
+
+  /**
+   * Project-scoped Cursor discovery: only `projects/<slug(cwd)>/agent-transcripts`
+   * and matching `chats/<md5(cwd)>` meta. Never walks all of ~/.cursor.
+   */
+  const discoverCursorSessionsForWorkspace = Effect.fn(
+    "AgentSessionScanner.discoverCursorSessionsForWorkspace",
+  )(function* (workspaceRoot: string) {
+    const homes = yield* resolveSourceHomes("cursor");
+    const root = path.resolve(expandHomePath(workspaceRoot));
+    const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
+    const cwdVariants = root === realRoot ? [root] : [root, realRoot];
+    const seenFiles = new Set<string>();
+    const transcripts: Array<
+      TranscriptCandidate & { readonly titleOverride?: string; readonly cwd: string }
+    > = [];
+    let truncated = false;
+    let providerError: string | null = null;
+
+    for (const home of homes) {
+      const projectsRoot = path.join(home.homePath, "projects");
+      const probed = yield* fileSystem.readDirectory(projectsRoot).pipe(
+        Effect.as(null as string | null),
+        Effect.catchTags({
+          PlatformError: (error: PlatformError.PlatformError) =>
+            error.reason._tag === "NotFound"
+              ? Effect.succeed(null)
+              : Effect.succeed(
+                  error.message.trim().length > 0
+                    ? error.message
+                    : `Could not read ${projectsRoot}`,
+                ),
+        }),
+      );
+      if (probed !== null) {
+        providerError = probed;
+        continue;
+      }
+
+      for (const cwd of cwdVariants) {
+        const slug = cursorProjectSlug(cwd);
+        const chatHash = cursorChatDirectoryHash(cwd);
+        const transcriptsDir = path.join(home.homePath, "projects", slug, "agent-transcripts");
+        const agentIds = yield* listDirectory(transcriptsDir);
+        for (const agentId of agentIds) {
+          if (transcripts.length >= MAX_TRANSCRIPTS_PER_SOURCE) {
+            truncated = true;
+            break;
+          }
+          const trimmedId = agentId.trim();
+          if (trimmedId.length === 0) continue;
+          const filePath = path.join(transcriptsDir, trimmedId, `${trimmedId}.jsonl`);
+          if (seenFiles.has(filePath)) continue;
+          const storeDbPath = path.join(home.homePath, "chats", chatHash, trimmedId, "store.db");
+          const chatMeta = readCursorChatMeta(storeDbPath);
+          if (chatMeta?.isSubagent === true) continue;
+
+          const stats = yield* statOption(filePath);
+          if (
+            Option.isNone(stats) ||
+            stats.value.type !== "File" ||
+            Option.isNone(stats.value.mtime)
+          ) {
+            continue;
+          }
+          seenFiles.add(filePath);
+          transcripts.push({
+            filePath,
+            mtimeMs: stats.value.mtime.value.getTime(),
+            providerInstanceId: home.providerInstanceId,
+            size: Number(stats.value.size),
+            ...(chatMeta?.name ? { titleOverride: chatMeta.name } : {}),
+            cwd: root,
+          });
+        }
+      }
+    }
+
+    return { transcripts, truncated, providerError };
   });
 
   const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
@@ -1511,11 +1827,38 @@ export const make = Effect.gen(function* () {
     const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
     cachedCandidates = candidates;
 
+    const cursorDiscovery = yield* discoverCursorSessionsForWorkspace(workspaceRoot);
+    const cursorByInstance = Map.groupBy(
+      cursorDiscovery.transcripts,
+      (transcript) => transcript.providerInstanceId,
+    );
+    const cursorCandidates: Array<RawCandidate> = Array.from(
+      cursorByInstance.entries(),
+      ([providerInstanceId, transcripts]) => {
+        const lastActiveAtMs = transcripts.reduce(
+          (max, transcript) => Math.max(max, transcript.mtimeMs),
+          0,
+        );
+        return {
+          cwd: root,
+          source: "cursor" as const,
+          providerInstanceId,
+          threadCount: transcripts.length,
+          lastActiveAtMs,
+          transcripts: transcripts.map((transcript) => ({
+            filePath: transcript.filePath,
+            mtimeMs: transcript.mtimeMs,
+            ...(transcript.titleOverride ? { titleOverride: transcript.titleOverride } : {}),
+          })),
+        };
+      },
+    );
+
     const eligibleTranscripts: Array<{
       readonly candidate: RawCandidate;
       readonly transcript: RawCandidate["transcripts"][number] & { readonly mtimeMs: number };
     }> = [];
-    for (const candidate of candidates) {
+    for (const candidate of [...candidates, ...cursorCandidates]) {
       const expanded = expandHomePath(candidate.cwd.trim());
       if (!path.isAbsolute(expanded)) continue;
       const resolved = path.resolve(expanded);
@@ -1604,20 +1947,23 @@ export const make = Effect.gen(function* () {
           recordsRemaining -= snapshot.recordCount;
 
           // A stable replacement file can belong to a different project than the cached candidate.
-          let snapshotCwd: string | null = null;
-          for (const record of snapshot.records) {
-            snapshotCwd = extractDecodedCwd(record);
-            if (snapshotCwd !== null) break;
-          }
-          if (snapshotCwd === null) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-          }
-          const expandedCwd = expandHomePath(snapshotCwd.trim());
-          if (
-            !path.isAbsolute(expandedCwd) ||
-            (yield* directoryIdentity(path.resolve(expandedCwd))) !== rootIdentity
-          ) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+          // Cursor transcripts omit cwd; discovery already scoped them to this workspace.
+          if (candidate.source !== "cursor") {
+            let snapshotCwd: string | null = null;
+            for (const record of snapshot.records) {
+              snapshotCwd = extractDecodedCwd(record);
+              if (snapshotCwd !== null) break;
+            }
+            if (snapshotCwd === null) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            const expandedCwd = expandHomePath(snapshotCwd.trim());
+            if (
+              !path.isAbsolute(expandedCwd) ||
+              (yield* directoryIdentity(path.resolve(expandedCwd))) !== rootIdentity
+            ) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
           }
 
           const parsedThread = parseAgentSessionRecords(
@@ -1632,21 +1978,25 @@ export const make = Effect.gen(function* () {
           if (parsedThread === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
+          const titledThread =
+            transcript.titleOverride !== undefined && transcript.titleOverride.trim().length > 0
+              ? { ...parsedThread, title: transcript.titleOverride.trim() }
+              : parsedThread;
 
           const source: AgentSessionImportSource = {
             ...identity,
-            provider: parsedThread.source,
-            providerInstanceId: parsedThread.providerInstanceId,
-            providerSessionId: parsedThread.providerSessionId,
+            provider: titledThread.source,
+            providerInstanceId: titledThread.providerInstanceId,
+            providerSessionId: titledThread.providerSessionId,
           };
-          const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
+          const sessionKey = `${titledThread.providerInstanceId}\0${titledThread.providerSessionId}`;
           if (importedSessions.has(sessionKey)) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
           }
           importedSessions.add(sessionKey);
           return Option.some<AgentSessionRecentThread>({
             _tag: "Importable",
-            thread: parsedThread,
+            thread: titledThread,
             source,
           });
         }).pipe(importReadLock.withPermits(1)),
@@ -1706,11 +2056,41 @@ export const make = Effect.gen(function* () {
       const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
       cachedCandidates = candidates;
 
+      const cursorDiscovery = yield* discoverCursorSessionsForWorkspace(workspaceRoot);
+      if (cursorDiscovery.providerError !== null) {
+        providerErrors.push({ source: "cursor", message: cursorDiscovery.providerError });
+      }
+      const cursorByInstance = Map.groupBy(
+        cursorDiscovery.transcripts,
+        (transcript) => transcript.providerInstanceId,
+      );
+      const cursorCandidates: Array<RawCandidate> = Array.from(
+        cursorByInstance.entries(),
+        ([providerInstanceId, transcripts]) => {
+          const lastActiveAtMs = transcripts.reduce(
+            (max, transcript) => Math.max(max, transcript.mtimeMs),
+            0,
+          );
+          return {
+            cwd: root,
+            source: "cursor" as const,
+            providerInstanceId,
+            threadCount: transcripts.length,
+            lastActiveAtMs,
+            transcripts: transcripts.map((transcript) => ({
+              filePath: transcript.filePath,
+              mtimeMs: transcript.mtimeMs,
+              ...(transcript.titleOverride ? { titleOverride: transcript.titleOverride } : {}),
+            })),
+          };
+        },
+      );
+
       const eligibleTranscripts: Array<{
         readonly candidate: RawCandidate;
         readonly transcript: RawCandidate["transcripts"][number] & { readonly mtimeMs: number };
       }> = [];
-      for (const candidate of candidates) {
+      for (const candidate of [...candidates, ...cursorCandidates]) {
         const expanded = expandHomePath(candidate.cwd.trim());
         if (!path.isAbsolute(expanded)) continue;
         const resolved = path.resolve(expanded);
@@ -1739,7 +2119,7 @@ export const make = Effect.gen(function* () {
       });
 
       const descriptors: Array<AgentSessionDescriptor> = [];
-      let truncated = false;
+      let truncated = cursorDiscovery.truncated;
       for (const { candidate, transcript } of eligibleTranscripts) {
         if (descriptors.length >= limit) {
           truncated = true;
@@ -1758,7 +2138,10 @@ export const make = Effect.gen(function* () {
           source: candidate.source,
           providerInstanceId: candidate.providerInstanceId,
           providerSessionId: meta.providerSessionId,
-          title: meta.title,
+          title:
+            transcript.titleOverride !== undefined && transcript.titleOverride.trim().length > 0
+              ? transcript.titleOverride.trim()
+              : meta.title,
           promptPreview: meta.promptPreview,
           lastActiveAt: DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs)),
           cwd: candidate.cwd,

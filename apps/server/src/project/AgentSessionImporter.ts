@@ -55,7 +55,7 @@ const lockForAttach = (key: string): Semaphore.Semaphore => {
 class AgentSessionUnresumableSessionError extends Schema.TaggedError<AgentSessionUnresumableSessionError>()(
   "AgentSessionUnresumableSessionError",
   {
-    source: Schema.Literals(["claudeAgent", "codex"]),
+    source: Schema.Literals(["claudeAgent", "codex", "cursor"]),
     providerSessionId: Schema.String,
   },
 ) {
@@ -183,7 +183,16 @@ const importDiscoveredSession = Effect.fn("importDiscoveredSession")(function* (
   const importedHistoryPresent = Option.isSome(existingThread)
     ? hasImportedHistory(existingThread.value)
     : false;
-  if (Option.isSome(existingThread) && importedHistoryPresent && Option.isSome(existingBinding)) {
+  // Cursor IDE/CLI chat ids are not proven to load via ACP session/load, so
+  // imports are history-only: create the thread + messages without a resume
+  // binding. Already-imported Cursor threads therefore have history and no
+  // binding, unlike Claude/Codex which install a resume cursor first.
+  const historyOnlyImport = thread.source === "cursor";
+  if (
+    Option.isSome(existingThread) &&
+    importedHistoryPresent &&
+    (Option.isSome(existingBinding) || historyOnlyImport)
+  ) {
     yield* directory.recordImportedTranscript({ threadId, source: input.source });
     return { threadId, created: false } as const;
   }
@@ -206,8 +215,10 @@ const importDiscoveredSession = Effect.fn("importDiscoveredSession")(function* (
 
   // Install the cursor before the thread becomes visible. A concurrent
   // real session can replace it, while insert-ignore keeps this import
-  // from replacing that newer binding.
-  if (Option.isNone(existingBinding)) {
+  // from replacing that newer binding. Cursor skips this: ACP cannot
+  // reliably resume chats/<md5>/<agentId> ids, and a false takeover claim
+  // is worse than history-only.
+  if (Option.isNone(existingBinding) && !historyOnlyImport) {
     yield* directory.upsert(
       {
         threadId,
@@ -350,22 +361,45 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
 ) {
   const scanner = yield* AgentSessionScanner.AgentSessionScanner;
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const project = yield* resolveImportProject(input);
   const limit = input.limit ?? DEFAULT_SESSION_LIST_LIMIT;
-  const page = yield* scanner.listRecentSessionDescriptors(project.workspaceRoot, limit);
+
+  const knownSessionKeys = yield* collectKnownProviderSessionKeys({
+    projectId: project.id,
+    snapshots,
+    directory,
+  });
+
+  // Inflate the discovery window so already-owned sessions don't eat the page.
+  const scanLimit = Math.min(200, limit + knownSessionKeys.size);
+  const page = yield* scanner.listRecentSessionDescriptors(project.workspaceRoot, scanLimit);
 
   const entries: AgentSessionListResult["entries"] = [];
+  let filteredAlreadyImportedCount = 0;
   for (const descriptor of page.descriptors) {
+    const sessionKey = `${descriptor.providerInstanceId}\0${descriptor.providerSessionId}`;
     const threadId = ThreadId.make(
       `import:${descriptor.providerInstanceId}:${descriptor.providerSessionId}`,
     );
-    const existing = yield* snapshots
+    const existingImport = yield* snapshots
       .getThreadDetailById(threadId)
       .pipe(
         Effect.mapError(
           (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
         ),
       );
+    const alreadyOwned =
+      knownSessionKeys.has(sessionKey) ||
+      (Option.isSome(existingImport) && existingImport.value.deletedAt === null);
+
+    if (alreadyOwned) {
+      filteredAlreadyImportedCount += 1;
+      continue;
+    }
+    if (entries.length >= limit) {
+      continue;
+    }
     entries.push({
       provider: descriptor.source,
       providerInstanceId: descriptor.providerInstanceId,
@@ -374,9 +408,12 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
       promptPreview: descriptor.promptPreview,
       lastActiveAt: descriptor.lastActiveAt,
       cwd: descriptor.cwd,
-      alreadyImported: Option.isSome(existing),
+      alreadyImported: false,
     });
   }
+
+  const truncated =
+    page.truncated || page.descriptors.length > entries.length + filteredAlreadyImportedCount;
 
   return {
     entries,
@@ -384,9 +421,65 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
       provider: failure.source,
       message: failure.message,
     })),
-    ...(page.truncated ? { truncated: true } : {}),
+    ...(filteredAlreadyImportedCount > 0 ? { filteredAlreadyImportedCount } : {}),
+    ...(truncated ? { truncated: true } : {}),
   } satisfies AgentSessionListResult;
 });
+
+function providerSessionIdFromResumeCursor(resumeCursor: unknown): string | null {
+  if (typeof resumeCursor !== "object" || resumeCursor === null) return null;
+  const record = resumeCursor as Record<string, unknown>;
+  if (typeof record.sessionId === "string" && record.sessionId.trim().length > 0) {
+    return record.sessionId.trim();
+  }
+  if (typeof record.resume === "string" && record.resume.trim().length > 0) {
+    return record.resume.trim();
+  }
+  // Codex stores the native thread id as `threadId` with no `resume` field.
+  if (
+    typeof record.threadId === "string" &&
+    record.threadId.trim().length > 0 &&
+    record.resume === undefined &&
+    record.sessionId === undefined
+  ) {
+    return record.threadId.trim();
+  }
+  return null;
+}
+
+const collectKnownProviderSessionKeys = Effect.fn("collectKnownProviderSessionKeys")(
+  function* (input: {
+    readonly projectId: ProjectId;
+    readonly snapshots: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+    readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
+  }) {
+    const keys = new Set<string>();
+    const imported = yield* input.snapshots
+      .getImportedAgentSessionSources(input.projectId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+        ),
+      );
+    for (const entry of imported) {
+      keys.add(`${entry.source.providerInstanceId}\0${entry.source.providerSessionId}`);
+    }
+
+    const bindings = yield* input.directory
+      .listBindings()
+      .pipe(
+        Effect.mapError(
+          (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+        ),
+      );
+    for (const binding of bindings) {
+      const sessionId = providerSessionIdFromResumeCursor(binding.resumeCursor);
+      if (sessionId === null) continue;
+      keys.add(`${binding.providerInstanceId}\0${sessionId}`);
+    }
+    return keys;
+  },
+);
 
 /** Attach one provider session as a project thread, or navigate to it if already imported. */
 export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
@@ -398,7 +491,6 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
       const scanner = yield* AgentSessionScanner.AgentSessionScanner;
       const engine = yield* OrchestrationEngine.OrchestrationEngineService;
       const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
       const crypto = yield* Crypto.Crypto;
       const project = yield* resolveImportProject(input);
       const workspaceRoot = project.workspaceRoot;
@@ -413,13 +505,9 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
             (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
           ),
         );
-      const existingBinding = yield* directory.getBinding(threadId);
 
-      if (
-        Option.isSome(existingThread) &&
-        hasImportedHistory(existingThread.value) &&
-        Option.isSome(existingBinding)
-      ) {
+      if (Option.isSome(existingThread) && hasImportedHistory(existingThread.value)) {
+        // Includes Cursor history-only imports, which deliberately omit a resume binding.
         if (existingThread.value.deletedAt !== null) {
           return yield* new AgentSessionAttachDeletedThreadError({ threadId });
         }

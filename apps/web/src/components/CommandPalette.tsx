@@ -47,6 +47,7 @@ import {
   FileSearchIcon,
   FolderIcon,
   FolderPlusIcon,
+  InboxIcon,
   LinkIcon,
   MessageSquareIcon,
   MonitorIcon,
@@ -167,6 +168,7 @@ import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { openLinkPullRequestDialog } from "./pullRequest/LinkPullRequestDialog";
+import { openImportThreadSheet } from "./importThread/ImportThreadSheet";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
 import { searchSettings, SETTINGS_SECTION_LABELS } from "./settings/settingsSearch";
@@ -1875,6 +1877,26 @@ function OpenCommandPaletteDialog(props: {
       openAddProjectFlow();
     },
   });
+
+  if (projects.length > 0) {
+    actionItems.push({
+      kind: "action",
+      value: "action:import-thread",
+      searchTerms: [
+        "import thread",
+        "import session",
+        "claude",
+        "codex",
+        "attach session",
+        "recent sessions",
+      ],
+      title: "Import thread",
+      icon: <InboxIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        openImportThreadSheet();
+      },
+    });
+  }
 
   if (wslAddProjectEnvironmentOption) {
     actionItems.push({

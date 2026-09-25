@@ -73,10 +73,17 @@ const WORKSPACE_ROOT = "/tmp/project-from-server";
 const CLAUDE_SESSION_ID = "123e4567-e89b-42d3-a456-426614174000";
 const encodeTranscriptRecord = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
-const makeThread = (source: "codex" | "claudeAgent"): AgentSessionScanner.AgentSessionThread => ({
+const makeThread = (
+  source: "codex" | "claudeAgent" | "cursor",
+): AgentSessionScanner.AgentSessionThread => ({
   source,
   providerInstanceId: ProviderInstanceId.make(source),
-  providerSessionId: source === "codex" ? "codex-session" : CLAUDE_SESSION_ID,
+  providerSessionId:
+    source === "codex"
+      ? "codex-session"
+      : source === "cursor"
+        ? "55555555-5555-4555-8555-555555555555"
+        : CLAUDE_SESSION_ID,
   title: `Imported ${source} thread`,
   model: null,
   createdAt: "2026-08-24T10:00:00.000Z",
@@ -115,7 +122,7 @@ const makeProject = (): OrchestrationProjectShell => ({
 });
 
 const makeProjectedThread = (input: {
-  readonly source: "codex" | "claudeAgent";
+  readonly source: "codex" | "claudeAgent" | "cursor";
   readonly projectId?: ProjectId;
   readonly imported?: boolean;
   readonly includeFollowup?: boolean;
@@ -188,7 +195,7 @@ const makeSnapshotsLayer = (input: {
   });
 
 const makeDescriptor = (
-  source: "codex" | "claudeAgent",
+  source: "codex" | "claudeAgent" | "cursor",
 ): AgentSessionScanner.AgentSessionDescriptor => {
   const thread = makeThread(source);
   return {
@@ -258,7 +265,7 @@ const makeRecordingDirectory = () => {
           Option.fromNullishOr(bindings.find((binding) => binding.threadId === threadId)),
         ),
       listThreadIds: () => Effect.die("unused"),
-      listBindings: () => Effect.die("unused"),
+      listBindings: () => Effect.succeed(bindings),
     }),
   };
 };
@@ -280,7 +287,16 @@ const makeStoppedBindingDirectory = () =>
         }),
       ),
     listThreadIds: () => Effect.die("unused"),
-    listBindings: () => Effect.die("unused"),
+    listBindings: () =>
+      Effect.succeed([
+        {
+          threadId: ThreadId.make("import:codex:codex-session"),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "stopped" as const,
+          resumeCursor: { threadId: "codex-session" },
+        },
+      ]),
   });
 
 const provideImporterServices =
@@ -323,12 +339,13 @@ const runAttach = (input: {
   readonly engine?: OrchestrationEngine.OrchestrationEngineService["Service"];
   readonly directory?: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
   readonly snapshots: ReturnType<typeof makeSnapshotsLayer>;
+  readonly providerInstanceId?: ProviderInstanceId;
   readonly providerSessionId?: string;
   readonly expectedWorkspaceRoot?: string;
 }) =>
   attachAgentSession({
     projectId: PROJECT_ID,
-    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerInstanceId: input.providerInstanceId ?? ProviderInstanceId.make("codex"),
     providerSessionId: input.providerSessionId ?? "codex-session",
     ...(input.expectedWorkspaceRoot === undefined
       ? {}
@@ -704,7 +721,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
   });
 
   describe("listAgentSessions", () => {
-    it.effect("flags sessions that already have a thread instead of hiding them", () =>
+    it.effect("omits sessions that already have a thread instead of listing them", () =>
       Effect.gen(function* () {
         const codexThreadId = ThreadId.make("import:codex:codex-session");
         const result = yield* runList({
@@ -723,16 +740,6 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         expect(result).toEqual({
           entries: [
             {
-              provider: "codex",
-              providerInstanceId: "codex",
-              providerSessionId: "codex-session",
-              title: "Imported codex thread",
-              promptPreview: "Fix the bug",
-              lastActiveAt: "2026-08-24T10:01:00.000Z",
-              cwd: WORKSPACE_ROOT,
-              alreadyImported: true,
-            },
-            {
               provider: "claudeAgent",
               providerInstanceId: "claudeAgent",
               providerSessionId: CLAUDE_SESSION_ID,
@@ -744,6 +751,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             },
           ],
           providerErrors: [],
+          filteredAlreadyImportedCount: 1,
         });
       }),
     );
@@ -845,6 +853,41 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             runtimePayload: { cwd: WORKSPACE_ROOT },
           },
         ]);
+      }),
+    );
+
+    it.effect("imports Cursor history without installing an ACP resume binding", () =>
+      Effect.gen(function* () {
+        const engine = makeRecordingEngine();
+        const directory = makeRecordingDirectory();
+        const cursorThread = makeThread("cursor");
+
+        const result = yield* runAttach({
+          scanner: makeDescriptorScanner({ descriptors: [makeDescriptor("cursor")] }),
+          engine: engine.service,
+          directory: directory.service,
+          snapshots: makeSnapshotsLayer({ project: makeProject() }),
+          providerInstanceId: cursorThread.providerInstanceId,
+          providerSessionId: cursorThread.providerSessionId,
+        });
+
+        expect(result).toEqual({
+          threadId: `import:cursor:${cursorThread.providerSessionId}`,
+          created: true,
+        });
+        expect(engine.commands.map((command) => command.type)).toEqual([
+          "thread.create",
+          "thread.history.import",
+        ]);
+        expect(directory.bindings).toEqual([]);
+        const history = engine.commands.find((command) => command.type === "thread.history.import");
+        expect(history).toMatchObject({
+          type: "thread.history.import",
+          messages: [
+            { role: "user", text: "Fix the bug" },
+            { role: "assistant", text: "Fixed" },
+          ],
+        });
       }),
     );
 

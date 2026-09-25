@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "@effect/vitest";
 import {
   type OrchestrationProjectShell,
@@ -8,6 +9,7 @@ import {
   ProviderInstanceId,
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -75,6 +77,8 @@ const makeProjectionSnapshotQueryLayer = (importedWorkspaceRoots: ReadonlyArray<
 interface ScannerTestInput {
   readonly claudeHomePath: string;
   readonly codexHomePath: string;
+  /** When set, overrides CURSOR_HOME for project-scoped Cursor discovery. */
+  readonly cursorHomePath?: string;
   readonly importedWorkspaceRoots?: ReadonlyArray<string>;
   /** Base dir for the test ServerConfig; worktreesDir derives from it. */
   readonly configBaseDir?: string;
@@ -99,6 +103,9 @@ const makeScannerTestLayer = (input: ScannerTestInput) =>
           input.configBaseDir ?? { prefix: "t3code-scanner-config-" },
         ),
         makeProjectionSnapshotQueryLayer(input.importedWorkspaceRoots ?? []),
+        ...(input.cursorHomePath === undefined
+          ? []
+          : [Layer.succeed(HostProcessEnvironment, { CURSOR_HOME: input.cursorHomePath })]),
       ),
     ),
   );
@@ -2835,6 +2842,306 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         ]);
         expect(page.providerErrors.map((failure) => failure.source)).toEqual(["codex"]);
         expect(page.providerErrors[0]?.message).not.toBe("");
+      }),
+    );
+
+    it.effect("skips system-prompt dumps and prefers the last assistant reply as preview", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-preview-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-preview-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-preview-workspace-");
+
+        const systemDump =
+          "<user_info>\nOS Version: linux\nWorkspace: /tmp\n</user_info>\n" +
+          "You are an AI coding assistant with full access to tools.";
+        const contents = [
+          encodeTranscriptRecord({
+            type: "user",
+            cwd: workspace,
+            sessionId: "preview-session",
+            timestamp: "2026-08-24T10:00:00.000Z",
+            message: { role: "user", content: systemDump },
+          }),
+          encodeTranscriptRecord({
+            type: "user",
+            sessionId: "preview-session",
+            timestamp: "2026-08-24T10:01:00.000Z",
+            message: { role: "user", content: "Fix the overlay spinner" },
+          }),
+          encodeTranscriptRecord({
+            type: "assistant",
+            sessionId: "preview-session",
+            timestamp: "2026-08-24T10:02:00.000Z",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "Looking at the spinner first." }],
+            },
+          }),
+          encodeTranscriptRecord({
+            type: "assistant",
+            sessionId: "preview-session",
+            timestamp: "2026-08-24T10:03:00.000Z",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "Spinner now only paints when the turn is live." }],
+            },
+          }),
+        ].join("\n");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-selected", "preview-session.jsonl"),
+          contents,
+          mtimeMs: nowMs,
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toEqual([
+          {
+            source: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "preview-session",
+            title: "Fix the overlay spinner",
+            promptPreview: "Spinner now only paints when the turn is live.",
+            lastActiveAt: "2026-08-24T12:00:00.000Z",
+            cwd: workspace,
+          },
+        ]);
+      }),
+    );
+
+    const writeCursorChatMeta = Effect.fn("AgentSessionScanner.test.writeCursorChatMeta")(
+      function* (input: {
+        readonly storeDbPath: string;
+        readonly meta: {
+          readonly agentId: string;
+          readonly name: string;
+          readonly createdAt: number;
+          readonly subagentInfo?: {
+            readonly parentAgentId: string;
+            readonly rootParentAgentId: string;
+            readonly toolCallId: string;
+            readonly typeName: string;
+          };
+        };
+      }) {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* fileSystem.makeDirectory(path.dirname(input.storeDbPath), { recursive: true });
+        yield* Effect.sync(() => {
+          const db = new DatabaseSync(input.storeDbPath);
+          try {
+            db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+            const hex = Buffer.from(JSON.stringify(input.meta), "utf8").toString("hex");
+            db.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run("0", hex);
+          } finally {
+            db.close();
+          }
+        });
+      },
+    );
+
+    it.effect("lists Cursor sessions for this cwd and skips subagents", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-cursor-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-cursor-codex-");
+        const cursorHomePath = yield* makeTempDir("t3code-descriptor-cursor-home-");
+        const workspace = yield* makeTempDir("t3code-descriptor-cursor-workspace-");
+        const otherWorkspace = yield* makeTempDir("t3code-descriptor-cursor-other-");
+
+        const parentId = "11111111-1111-4111-8111-111111111111";
+        const subagentId = "22222222-2222-4222-8222-222222222222";
+        const otherId = "33333333-3333-4333-8333-333333333333";
+        const slug = AgentSessionScanner.cursorProjectSlug(workspace);
+        const chatHash = AgentSessionScanner.cursorChatDirectoryHash(workspace);
+        const otherSlug = AgentSessionScanner.cursorProjectSlug(otherWorkspace);
+        const otherHash = AgentSessionScanner.cursorChatDirectoryHash(otherWorkspace);
+
+        const cursorTranscript = (prompt: string) =>
+          [
+            encodeTranscriptRecord({
+              role: "user",
+              message: {
+                content: [{ type: "text", text: `<user_query>\n${prompt}\n</user_query>` }],
+              },
+            }),
+            encodeTranscriptRecord({
+              role: "assistant",
+              message: { content: [{ type: "text", text: "Working on it" }] },
+            }),
+          ].join("\n");
+
+        yield* writeTranscript({
+          filePath: path.join(
+            cursorHomePath,
+            "projects",
+            slug,
+            "agent-transcripts",
+            parentId,
+            `${parentId}.jsonl`,
+          ),
+          contents: cursorTranscript("Fix the Cursor import"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+        yield* writeCursorChatMeta({
+          storeDbPath: path.join(cursorHomePath, "chats", chatHash, parentId, "store.db"),
+          meta: {
+            agentId: parentId,
+            name: "Cursor import fix",
+            createdAt: Date.parse("2026-08-24T10:55:00.000Z"),
+          },
+        });
+
+        yield* writeTranscript({
+          filePath: path.join(
+            cursorHomePath,
+            "projects",
+            slug,
+            "agent-transcripts",
+            subagentId,
+            `${subagentId}.jsonl`,
+          ),
+          contents: cursorTranscript("Subagent work"),
+          mtimeMs: Date.parse("2026-08-24T11:30:00.000Z"),
+        });
+        yield* writeCursorChatMeta({
+          storeDbPath: path.join(cursorHomePath, "chats", chatHash, subagentId, "store.db"),
+          meta: {
+            agentId: subagentId,
+            name: "Subagent",
+            createdAt: Date.parse("2026-08-24T11:25:00.000Z"),
+            subagentInfo: {
+              parentAgentId: parentId,
+              rootParentAgentId: parentId,
+              toolCallId: "call-1",
+              typeName: "generalPurpose",
+            },
+          },
+        });
+
+        yield* writeTranscript({
+          filePath: path.join(
+            cursorHomePath,
+            "projects",
+            otherSlug,
+            "agent-transcripts",
+            otherId,
+            `${otherId}.jsonl`,
+          ),
+          contents: cursorTranscript("Other project"),
+          mtimeMs: Date.parse("2026-08-24T11:45:00.000Z"),
+        });
+        yield* writeCursorChatMeta({
+          storeDbPath: path.join(cursorHomePath, "chats", otherHash, otherId, "store.db"),
+          meta: {
+            agentId: otherId,
+            name: "Elsewhere",
+            createdAt: Date.parse("2026-08-24T11:40:00.000Z"),
+          },
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          cursorHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toEqual([
+          {
+            source: "cursor",
+            providerInstanceId: "cursor",
+            providerSessionId: parentId,
+            title: "Cursor import fix",
+            promptPreview: "Working on it",
+            lastActiveAt: "2026-08-24T11:00:00.000Z",
+            cwd: workspace,
+          },
+        ]);
+        expect(page.providerErrors).toEqual([]);
+      }),
+    );
+
+    it.effect("imports Cursor transcript history for attach", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-cursor-import-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-cursor-import-codex-");
+        const cursorHomePath = yield* makeTempDir("t3code-cursor-import-home-");
+        const workspace = yield* makeTempDir("t3code-cursor-import-workspace-");
+        const agentId = "44444444-4444-4444-8444-444444444444";
+        const slug = AgentSessionScanner.cursorProjectSlug(workspace);
+        const chatHash = AgentSessionScanner.cursorChatDirectoryHash(workspace);
+
+        yield* writeTranscript({
+          filePath: path.join(
+            cursorHomePath,
+            "projects",
+            slug,
+            "agent-transcripts",
+            agentId,
+            `${agentId}.jsonl`,
+          ),
+          contents: [
+            encodeTranscriptRecord({
+              role: "user",
+              message: {
+                content: [
+                  {
+                    type: "text",
+                    text: "<user_query>\nShip the Cursor attach path\n</user_query>",
+                  },
+                ],
+              },
+            }),
+            encodeTranscriptRecord({
+              role: "assistant",
+              message: { content: [{ type: "text", text: "Imported history" }] },
+            }),
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+        yield* writeCursorChatMeta({
+          storeDbPath: path.join(cursorHomePath, "chats", chatHash, agentId, "store.db"),
+          meta: {
+            agentId,
+            name: "Cursor attach",
+            createdAt: Date.parse("2026-08-24T10:50:00.000Z"),
+          },
+        });
+
+        const threads = yield* runRecentThreads({
+          claudeHomePath,
+          codexHomePath,
+          cursorHomePath,
+          workspaceRoot: workspace,
+        });
+
+        expect(threads).toHaveLength(1);
+        expect(threads[0]).toMatchObject({
+          source: "cursor",
+          providerInstanceId: "cursor",
+          providerSessionId: agentId,
+          title: "Cursor attach",
+          messages: [
+            { role: "user", text: "Ship the Cursor attach path" },
+            { role: "assistant", text: "Imported history" },
+          ],
+        });
       }),
     );
   });
