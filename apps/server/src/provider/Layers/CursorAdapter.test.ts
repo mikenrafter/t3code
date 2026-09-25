@@ -2,6 +2,7 @@
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeSqlite from "node:sqlite";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -180,6 +181,64 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       const error = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
       assert.equal(error._tag, "ProviderAdapterRequestError");
       assert.deepStrictEqual((yield* adapter.readThread(threadId)).turns, originalTurns);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("emits native composerData contextUsagePercent after turn completion", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const resolveSettings = yield* makeResolveCursorSettings;
+      const threadId = ThreadId.make("cursor-composer-context-usage");
+      const stateDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-composer-usage-")),
+      );
+      const stateDbPath = NodePath.join(stateDir, "state.vscdb");
+      yield* Effect.sync(() => {
+        const db = new NodeSqlite.DatabaseSync(stateDbPath);
+        try {
+          db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
+          db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+            "composerData:mock-session-1",
+            JSON.stringify({ contextUsagePercent: 61.4545 }),
+          );
+        } finally {
+          db.close();
+        }
+      });
+
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      const adapter = yield* makeCursorAdapter(decodeCursorSettings({}), {
+        resolveSettings,
+        environment: { ...process.env, CURSOR_STATE_DB: stateDbPath },
+      });
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "thread.token-usage.updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "hello mock", attachments: [] });
+
+      const usageEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.equal(usageEvents.length, 1);
+      const usageEvent = usageEvents[0];
+      assert.equal(usageEvent?.type, "thread.token-usage.updated");
+      if (usageEvent?.type === "thread.token-usage.updated") {
+        assert.deepStrictEqual(usageEvent.payload.usage, { usedPercentage: 61.4545 });
+        assert.isUndefined(usageEvent.payload.usage.usedTokens);
+        assert.isUndefined(usageEvent.payload.usage.maxTokens);
+      }
+
       yield* adapter.stopSession(threadId);
     }),
   );

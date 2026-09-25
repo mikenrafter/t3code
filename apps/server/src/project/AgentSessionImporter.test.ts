@@ -186,17 +186,28 @@ const makeProjectedThread = (input: {
 
 const makeSnapshotsLayer = (input: {
   readonly project?: OrchestrationProjectShell;
+  readonly projects?: ReadonlyArray<OrchestrationProjectShell>;
   readonly getThread?: (threadId: ThreadId) => Option.Option<OrchestrationThread>;
-}) =>
-  Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
-    getProjectShellById: () =>
-      Effect.succeed(input.project === undefined ? Option.none() : Option.some(input.project)),
+}) => {
+  const projects = input.projects ?? (input.project === undefined ? [] : [input.project]);
+  const projectById = new Map(projects.map((project) => [project.id, project] as const));
+  return Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+    getProjectShellById: (projectId) =>
+      Effect.succeed(Option.fromNullishOr(projectById.get(projectId))),
+    getShellSnapshot: () =>
+      Effect.succeed({
+        snapshotSequence: 0,
+        projects,
+        threads: [],
+        updatedAt: "2026-08-24T09:00:00.000Z",
+      }),
     getImportedAgentSessionSources: () => Effect.succeed([]),
     getThreadDetailById: (threadId) => Effect.succeed(input.getThread?.(threadId) ?? Option.none()),
   });
-
+};
 const makeDescriptor = (
   source: "codex" | "claudeAgent" | "cursor",
+  overrides: Partial<AgentSessionScanner.AgentSessionDescriptor> = {},
 ): AgentSessionScanner.AgentSessionDescriptor => {
   const thread = makeThread(source);
   return {
@@ -207,6 +218,7 @@ const makeDescriptor = (
     promptPreview: thread.messages[0]?.text ?? "",
     lastActiveAt: thread.updatedAt,
     cwd: WORKSPACE_ROOT,
+    ...overrides,
   };
 };
 
@@ -325,14 +337,24 @@ const runList = (input: {
   readonly scanner: AgentSessionScanner.AgentSessionScanner["Service"];
   readonly snapshots: ReturnType<typeof makeSnapshotsLayer>;
   readonly limit?: number;
+  readonly projectId?: ProjectId;
   readonly expectedWorkspaceRoot?: string;
 }) =>
   listAgentSessions({
-    projectId: PROJECT_ID,
+    ...(input.projectId === undefined ? { projectId: PROJECT_ID } : { projectId: input.projectId }),
     ...(input.limit === undefined ? {} : { limit: input.limit }),
     ...(input.expectedWorkspaceRoot === undefined
       ? {}
       : { expectedWorkspaceRoot: input.expectedWorkspaceRoot }),
+  }).pipe(provideImporterServices(input));
+
+const runListAutomatic = (input: {
+  readonly scanner: AgentSessionScanner.AgentSessionScanner["Service"];
+  readonly snapshots: ReturnType<typeof makeSnapshotsLayer>;
+  readonly limit?: number;
+}) =>
+  listAgentSessions({
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
   }).pipe(provideImporterServices(input));
 
 const runAttach = (input: {
@@ -752,6 +774,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
               createdAt: "2026-08-24T10:01:00.000Z",
               lastMessageAt: "2026-08-24T10:01:00.000Z",
               cwd: WORKSPACE_ROOT,
+              projectId: PROJECT_ID,
+              projectTitle: "Project",
               alreadyImported: false,
               importable: true,
               hasCompactionSummary: false,
@@ -794,6 +818,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         expect(result.entries[0]).toMatchObject({
           provider: "claudeAgent",
           providerSessionId: CLAUDE_SESSION_ID,
+          projectId: PROJECT_ID,
+          projectTitle: "Project",
           createdAt: "2026-08-20T09:00:00.000Z",
           lastMessageAt: "2026-08-24T10:01:00.000Z",
           contextUsedTokens: 12_000,
@@ -802,6 +828,107 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           importable: true,
           hasCompactionSummary: true,
         });
+      }),
+    );
+
+    it.effect("without projectId merges sessions across projects and tags each entry", () =>
+      Effect.gen(function* () {
+        const projectA = {
+          ...makeProject(),
+          id: ProjectId.make("project-a"),
+          title: "Alpha",
+          workspaceRoot: "/tmp/alpha",
+        };
+        const projectB = {
+          ...makeProject(),
+          id: ProjectId.make("project-b"),
+          title: "Beta",
+          workspaceRoot: "/tmp/beta",
+        };
+        const listedRoots: Array<string> = [];
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () => Stream.empty,
+          listRecentSessionDescriptors: (workspaceRoot, _limit) =>
+            Effect.sync(() => {
+              listedRoots.push(workspaceRoot);
+              if (workspaceRoot === "/tmp/alpha") {
+                return {
+                  descriptors: [
+                    makeDescriptor("codex", {
+                      providerSessionId: "session-alpha",
+                      cwd: "/tmp/alpha",
+                      lastActiveAt: "2026-08-24T12:00:00.000Z",
+                      title: "Alpha session",
+                    }),
+                  ],
+                  providerErrors: [],
+                  truncated: false,
+                };
+              }
+              if (workspaceRoot === "/tmp/beta") {
+                return {
+                  descriptors: [
+                    makeDescriptor("claudeAgent", {
+                      providerSessionId: "session-beta",
+                      cwd: "/tmp/beta",
+                      lastActiveAt: "2026-08-24T11:00:00.000Z",
+                      title: "Beta session",
+                    }),
+                  ],
+                  providerErrors: [
+                    { source: "cursor" as const, message: "Could not read the Cursor home" },
+                  ],
+                  truncated: false,
+                };
+              }
+              return { descriptors: [], providerErrors: [], truncated: false };
+            }),
+        });
+
+        const result = yield* runListAutomatic({
+          scanner,
+          snapshots: makeSnapshotsLayer({ projects: [projectA, projectB] }),
+        });
+
+        expect(listedRoots.sort()).toEqual(["/tmp/alpha", "/tmp/beta"]);
+        expect(result.entries).toEqual([
+          {
+            provider: "codex",
+            providerInstanceId: "codex",
+            providerSessionId: "session-alpha",
+            title: "Alpha session",
+            promptPreview: "Fix the bug",
+            lastActiveAt: "2026-08-24T12:00:00.000Z",
+            createdAt: "2026-08-24T12:00:00.000Z",
+            lastMessageAt: "2026-08-24T12:00:00.000Z",
+            cwd: "/tmp/alpha",
+            projectId: projectA.id,
+            projectTitle: "Alpha",
+            alreadyImported: false,
+            importable: true,
+            hasCompactionSummary: false,
+          },
+          {
+            provider: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "session-beta",
+            title: "Beta session",
+            promptPreview: "Fix the bug",
+            lastActiveAt: "2026-08-24T11:00:00.000Z",
+            createdAt: "2026-08-24T11:00:00.000Z",
+            lastMessageAt: "2026-08-24T11:00:00.000Z",
+            cwd: "/tmp/beta",
+            projectId: projectB.id,
+            projectTitle: "Beta",
+            alreadyImported: false,
+            importable: true,
+            hasCompactionSummary: false,
+          },
+        ]);
+        expect(result.providerErrors).toEqual([
+          { provider: "cursor", message: "Could not read the Cursor home" },
+        ]);
       }),
     );
 

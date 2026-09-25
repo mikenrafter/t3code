@@ -402,34 +402,48 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
   return { importedCount, skippedCount } satisfies AgentSessionImportResult;
 });
 
-/** List recent provider sessions for a project, newest first. */
-export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
-  input: AgentSessionListInput,
-) {
-  const scanner = yield* AgentSessionScanner.AgentSessionScanner;
-  const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-  const project = yield* resolveImportProject(input);
-  const limit = input.limit ?? DEFAULT_SESSION_LIST_LIMIT;
+type ListedSessionProject = {
+  readonly id: ProjectId;
+  readonly title: string;
+  readonly workspaceRoot: string;
+};
 
+type ProjectSessionPage = {
+  readonly entries: AgentSessionListResult["entries"];
+  readonly filteredAlreadyImportedCount: number;
+  readonly providerErrors: AgentSessionListResult["providerErrors"];
+  readonly truncated: boolean;
+  readonly discoveredCount: number;
+};
+
+const listSessionsForProject = Effect.fn("listSessionsForProject")(function* (input: {
+  readonly project: ListedSessionProject;
+  readonly limit: number;
+  readonly scanner: AgentSessionScanner.AgentSessionScanner["Service"];
+  readonly snapshots: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+  readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
+}) {
   const knownSessionKeys = yield* collectKnownProviderSessionKeys({
-    projectId: project.id,
-    snapshots,
-    directory,
+    projectId: input.project.id,
+    snapshots: input.snapshots,
+    directory: input.directory,
   });
 
   // Inflate the discovery window so already-owned sessions don't eat the page.
-  const scanLimit = Math.min(200, limit + knownSessionKeys.size);
-  const page = yield* scanner.listRecentSessionDescriptors(project.workspaceRoot, scanLimit);
+  const scanLimit = Math.min(200, input.limit + knownSessionKeys.size);
+  const page = yield* input.scanner.listRecentSessionDescriptors(
+    input.project.workspaceRoot,
+    scanLimit,
+  );
 
-  const entries: AgentSessionListResult["entries"] = [];
+  const entries: Array<AgentSessionListResult["entries"][number]> = [];
   let filteredAlreadyImportedCount = 0;
   for (const descriptor of page.descriptors) {
     const sessionKey = `${descriptor.providerInstanceId}\0${descriptor.providerSessionId}`;
     const threadId = ThreadId.make(
       `import:${descriptor.providerInstanceId}:${descriptor.providerSessionId}`,
     );
-    const existingImport = yield* snapshots
+    const existingImport = yield* input.snapshots
       .getThreadDetailById(threadId)
       .pipe(
         Effect.mapError(
@@ -444,7 +458,7 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
       filteredAlreadyImportedCount += 1;
       continue;
     }
-    if (entries.length >= limit) {
+    if (entries.length >= input.limit) {
       continue;
     }
     entries.push({
@@ -457,6 +471,8 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
       createdAt: descriptor.createdAt ?? descriptor.lastActiveAt,
       lastMessageAt: descriptor.lastMessageAt ?? descriptor.lastActiveAt,
       cwd: descriptor.cwd,
+      projectId: input.project.id,
+      projectTitle: input.project.title,
       alreadyImported: false,
       ...(descriptor.contextMaxTokens !== undefined
         ? { contextMaxTokens: descriptor.contextMaxTokens }
@@ -480,10 +496,132 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
 
   return {
     entries,
+    filteredAlreadyImportedCount,
     providerErrors: page.providerErrors.map((failure) => ({
       provider: failure.source,
       message: failure.message,
     })),
+    truncated,
+    discoveredCount: page.descriptors.length,
+  } satisfies ProjectSessionPage;
+});
+
+function mergeProviderErrors(
+  pages: ReadonlyArray<Pick<ProjectSessionPage, "providerErrors">>,
+): AgentSessionListResult["providerErrors"] {
+  const byProvider = new Map<string, AgentSessionListResult["providerErrors"][number]>();
+  for (const page of pages) {
+    for (const error of page.providerErrors) {
+      if (!byProvider.has(error.provider)) {
+        byProvider.set(error.provider, error);
+      }
+    }
+  }
+  return [...byProvider.values()];
+}
+
+/** Newest first; when tied, stable by provider session key. */
+function compareSessionsByRecency(
+  left: AgentSessionListResult["entries"][number],
+  right: AgentSessionListResult["entries"][number],
+): number {
+  if (left.lastActiveAt !== right.lastActiveAt) {
+    return right.lastActiveAt.localeCompare(left.lastActiveAt);
+  }
+  const leftKey = `${left.providerInstanceId}\0${left.providerSessionId}`;
+  const rightKey = `${right.providerInstanceId}\0${right.providerSessionId}`;
+  return leftKey.localeCompare(rightKey);
+}
+
+/**
+ * Keep the newest row per provider session when the same transcript appears
+ * under more than one project root.
+ */
+function dedupeSessionsByProviderSession(
+  entries: ReadonlyArray<AgentSessionListResult["entries"][number]>,
+): AgentSessionListResult["entries"] {
+  const sorted = [...entries].sort(compareSessionsByRecency);
+  const seen = new Set<string>();
+  const deduped: Array<AgentSessionListResult["entries"][number]> = [];
+  for (const entry of sorted) {
+    const key = `${entry.providerInstanceId}\0${entry.providerSessionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(entry);
+  }
+  return deduped;
+}
+
+/** List recent provider sessions for a project (or all projects), newest first. */
+export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
+  input: AgentSessionListInput,
+) {
+  const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+  const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  const limit = input.limit ?? DEFAULT_SESSION_LIST_LIMIT;
+
+  const projects: ListedSessionProject[] = [];
+  if (input.projectId !== undefined) {
+    const project = yield* resolveImportProject({
+      projectId: input.projectId,
+      ...(input.expectedWorkspaceRoot !== undefined
+        ? { expectedWorkspaceRoot: input.expectedWorkspaceRoot }
+        : {}),
+    });
+    projects.push({
+      id: project.id,
+      title: project.title,
+      workspaceRoot: project.workspaceRoot,
+    });
+  } else {
+    // Automatic: every active shell project on this environment.
+    const shellSnapshot = yield* snapshots
+      .getShellSnapshot()
+      .pipe(
+        Effect.mapError(
+          (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
+        ),
+      );
+    for (const project of shellSnapshot.projects) {
+      projects.push({
+        id: project.id,
+        title: project.title,
+        workspaceRoot: project.workspaceRoot,
+      });
+    }
+  }
+
+  const pages: ProjectSessionPage[] = [];
+  for (const project of projects) {
+    pages.push(
+      yield* listSessionsForProject({
+        project,
+        limit,
+        scanner,
+        snapshots,
+        directory,
+      }),
+    );
+  }
+
+  const mergedEntries = dedupeSessionsByProviderSession(pages.flatMap((page) => page.entries));
+  const entries = mergedEntries.slice(0, limit);
+  const filteredAlreadyImportedCount = pages.reduce(
+    (sum, page) => sum + page.filteredAlreadyImportedCount,
+    0,
+  );
+  const providerErrors = mergeProviderErrors(pages);
+  const truncated =
+    pages.some((page) => page.truncated) ||
+    mergedEntries.length > limit ||
+    pages.some(
+      (page) => page.discoveredCount > page.entries.length + page.filteredAlreadyImportedCount,
+    );
+
+  return {
+    entries,
+    providerErrors,
     ...(filteredAlreadyImportedCount > 0 ? { filteredAlreadyImportedCount } : {}),
     ...(truncated ? { truncated: true } : {}),
   } satisfies AgentSessionListResult;

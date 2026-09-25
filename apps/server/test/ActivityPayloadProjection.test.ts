@@ -578,6 +578,32 @@ describe("context-window snapshot dedup", () => {
     );
   });
 
+  it("keeps only the latest percent-only context-window activity per turn", () => {
+    const stale: OrchestrationThreadActivity = {
+      id: EventId.make("ctx-pct-1"),
+      tone: "info",
+      kind: "context-window.updated",
+      summary: "Context window updated",
+      payload: { usedPercentage: 37 },
+      turnId: TurnId.make("turn-a"),
+      createdAt: "2026-07-27T00:00:00.000Z",
+    };
+    const latest: OrchestrationThreadActivity = {
+      ...stale,
+      id: EventId.make("ctx-pct-2"),
+      payload: { usedPercentage: 42 },
+    };
+
+    const projected = projectThreadDetailSnapshot({
+      snapshotSequence: 7,
+      thread: makeThread([stale, latest]),
+    });
+
+    expect(projected.thread.activities.map((activity) => activity.id)).toEqual([latest.id]);
+    expect(deriveLatestContextWindowSnapshot(projected.thread.activities)?.usedPercentage).toBe(42);
+    expect(deriveLatestContextWindowSnapshot(projected.thread.activities)?.usedTokens).toBeNull();
+  });
+
   it("does not let a malformed row shadow an earlier valid row in the same turn", () => {
     const valid = makeContextWindowActivity("ctx-valid", 5_000, "turn-a");
     const malformed: OrchestrationThreadActivity = {

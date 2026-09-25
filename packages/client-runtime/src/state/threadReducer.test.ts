@@ -1383,6 +1383,46 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("replaces earlier percent-only context-window updates for the same turn", () => {
+      const percentActivity = (id: string, sequence: number, usedPercentage: number) => ({
+        id: EventId.make(id),
+        tone: "info" as const,
+        kind: "context-window.updated",
+        summary: "Context window updated",
+        payload: { usedPercentage },
+        turnId: TurnId.make("turn-1"),
+        sequence,
+        createdAt: "2026-04-01T11:00:00.000Z",
+      });
+
+      const result = applyThreadDetailEvent(
+        {
+          ...baseThread,
+          activities: [percentActivity("activity-cw-pct-1", 1, 37)],
+        },
+        {
+          ...baseEventFields,
+          sequence: 20,
+          occurredAt: "2026-04-01T11:02:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            activity: percentActivity("activity-cw-pct-2", 2, 42),
+          },
+        },
+      );
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.activities.map((activity) => activity.id)).toEqual([
+          "activity-cw-pct-2",
+        ]);
+        expect(result.thread.activities[0]?.payload).toEqual({ usedPercentage: 42 });
+      }
+    });
+
     it("does not collapse context-window history for a malformed update", () => {
       const resolvable = {
         id: EventId.make("activity-cw-resolvable"),

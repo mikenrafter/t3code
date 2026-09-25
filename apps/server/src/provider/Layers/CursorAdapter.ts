@@ -78,6 +78,7 @@ import {
 } from "../acp/CursorAcpExtension.ts";
 import { type CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
+import { readCursorComposerContextUsage } from "./cursorComposerData.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   discoverCursorSkills,
@@ -376,6 +377,33 @@ export function makeCursorAdapter(
 
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+
+    /** Read Cursor IDE composerData percent for the live session; missing row = no emit. */
+    const emitCursorComposerContextUsage = (ctx: CursorSessionContext, turnId: TurnId) =>
+      Effect.gen(function* () {
+        const sessionId = parseCursorResume(ctx.session.resumeCursor)?.sessionId;
+        if (!sessionId) {
+          return;
+        }
+        const composerUsage = readCursorComposerContextUsage(sessionId, {
+          env: options?.environment ?? process.env,
+        });
+        if (!composerUsage) {
+          return;
+        }
+        yield* offerRuntimeEvent({
+          type: "thread.token-usage.updated",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          payload: {
+            usage: {
+              usedPercentage: composerUsage.contextUsagePercent,
+            },
+          },
+        });
+      });
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -1146,6 +1174,7 @@ export function makeCursorAdapter(
                 stopReason: result.stopReason ?? null,
               },
             });
+            yield* emitCursorComposerContextUsage(ctx, turnId);
           }
 
           return {

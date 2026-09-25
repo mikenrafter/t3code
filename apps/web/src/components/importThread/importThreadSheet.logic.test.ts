@@ -1,19 +1,28 @@
-import { ProviderInstanceId, type AgentSessionEntry } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  ProjectId,
+  type AgentSessionEntry,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   PAGE_LIMITS,
   DEFAULT_IMPORT_HISTORY_MODE,
+  IMPORT_THREAD_PROJECT_AUTOMATIC,
   computeImportThreadEmptyState,
   filterImportThreadEntries,
   formatImportThreadContextParts,
   formatImportThreadTimeParts,
   importThreadEmptyStateMessage,
   importThreadRowBlockedReason,
+  isAutomaticImportProjectSelection,
   isImportThreadRowDisabled,
   nextPageLimit,
   providerLabel,
   resolveDefaultImportProject,
+  resolveImportAttachProject,
+  resolveImportListEnvironmentId,
 } from "./importThreadSheet.logic";
 
 function entry(
@@ -27,6 +36,8 @@ function entry(
     createdAt: overrides.createdAt ?? "2026-09-24T00:00:00.000Z",
     lastMessageAt: overrides.lastMessageAt ?? "2026-09-25T00:00:00.000Z",
     cwd: overrides.cwd ?? "/tmp/project",
+    projectId: overrides.projectId ?? ProjectId.make("project-1"),
+    projectTitle: overrides.projectTitle ?? "project",
     alreadyImported: overrides.alreadyImported ?? false,
     importable: overrides.importable ?? true,
     hasCompactionSummary: overrides.hasCompactionSummary ?? false,
@@ -191,6 +202,60 @@ describe("resolveDefaultImportProject", () => {
     ).toBe(c);
     expect(
       resolveDefaultImportProject({ preferred: null, activeThreadProject: null, projects: [] }),
+    ).toBeNull();
+  });
+});
+
+describe("Automatic import project selection", () => {
+  it("recognizes the Automatic radio value", () => {
+    expect(IMPORT_THREAD_PROJECT_AUTOMATIC).toBe("automatic");
+    expect(isAutomaticImportProjectSelection("automatic")).toBe(true);
+    expect(isAutomaticImportProjectSelection("env:project-1")).toBe(false);
+    expect(isAutomaticImportProjectSelection(null)).toBe(false);
+  });
+
+  it("picks the Automatic list environment from primary or first project", () => {
+    expect(
+      resolveImportListEnvironmentId({
+        primaryEnvironmentId: EnvironmentId.make("env-primary"),
+        projects: [{ environmentId: EnvironmentId.make("env-other") }],
+      }),
+    ).toBe("env-primary");
+    expect(
+      resolveImportListEnvironmentId({
+        primaryEnvironmentId: null,
+        projects: [{ environmentId: EnvironmentId.make("env-first") }],
+      }),
+    ).toBe("env-first");
+    expect(resolveImportListEnvironmentId({ primaryEnvironmentId: null, projects: [] })).toBeNull();
+  });
+
+  it("attaches into the entry's project when Automatic, else the picker selection", () => {
+    const alpha = { id: ProjectId.make("alpha") };
+    const beta = { id: ProjectId.make("beta") };
+    expect(
+      resolveImportAttachProject({
+        automatic: true,
+        entryProjectId: beta.id,
+        projects: [alpha, beta],
+        selectedProject: alpha,
+      }),
+    ).toBe(beta);
+    expect(
+      resolveImportAttachProject({
+        automatic: false,
+        entryProjectId: beta.id,
+        projects: [alpha, beta],
+        selectedProject: alpha,
+      }),
+    ).toBe(alpha);
+    expect(
+      resolveImportAttachProject({
+        automatic: true,
+        entryProjectId: ProjectId.make("missing"),
+        projects: [alpha],
+        selectedProject: alpha,
+      }),
     ).toBeNull();
   });
 });

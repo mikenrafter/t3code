@@ -260,8 +260,17 @@ const ThreadMetadataUpdatedPayload = Schema.Struct({
 });
 export type ThreadMetadataUpdatedPayload = typeof ThreadMetadataUpdatedPayload.Type;
 
+/** Native percent (0–100). Never derived from used/max on the wire. */
+const ContextUsagePercent = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
+
 export const ThreadTokenUsageSnapshot = Schema.Struct({
-  usedTokens: NonNegativeInt,
+  /** Absolute token fill. Optional when only a native percent is available (e.g. Cursor). */
+  usedTokens: Schema.optional(NonNegativeInt),
+  /**
+   * Native provider percent. Present alone without used/max is valid; never invent
+   * token counts from this value.
+   */
+  usedPercentage: Schema.optional(ContextUsagePercent),
   totalProcessedTokens: Schema.optional(NonNegativeInt),
   maxTokens: Schema.optional(PositiveInt),
   inputTokens: Schema.optional(NonNegativeInt),

@@ -110,9 +110,12 @@ export const AgentSessionImportResult = Schema.Struct({
 });
 export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
 
-/** Raised in steps as the user asks for more history. Filtering stays client-side. */
+/**
+ * Raised in steps as the user asks for more history. Filtering stays client-side.
+ * Omit `projectId` for Automatic: list recent sessions across every active project.
+ */
 export const AgentSessionListInput = Schema.Struct({
-  projectId: ProjectId,
+  projectId: Schema.optional(ProjectId),
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   limit: Schema.optional(PositiveInt),
 });
@@ -136,6 +139,9 @@ export const AgentSessionEntry = Schema.Struct({
   /** Timestamp of the latest retained message (or last activity). */
   lastMessageAt: IsoDateTime,
   cwd: TrimmedNonEmptyString,
+  /** Project this session belongs to (always set, including single-project lists). */
+  projectId: ProjectId,
+  projectTitle: TrimmedNonEmptyString,
   alreadyImported: Schema.Boolean,
   /** Max context window size when the provider reports it. */
   contextMaxTokens: Schema.optional(NonNegativeInt),

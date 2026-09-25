@@ -73,9 +73,10 @@ const activityIdIndex = new WeakMap<
 
 /**
  * Matches the validity rule in `deriveLatestContextWindowSnapshot` (and the
- * server's snapshot-side `dropStaleContextWindowActivities`): rows without a
- * finite, non-negative `usedTokens` are skipped during the consumer's backward
- * walk, so they must not replace an earlier resolvable row here.
+ * server's snapshot-side `dropStaleContextWindowActivities`): rows need a
+ * finite, non-negative `usedTokens` and/or native `usedPercentage`. Malformed
+ * rows are skipped during the consumer's backward walk, so they must not
+ * replace an earlier resolvable row here.
  */
 function isResolvableContextWindowActivity(activity: OrchestrationThreadActivity): boolean {
   if (activity.kind !== "context-window.updated") {
@@ -86,7 +87,13 @@ function isResolvableContextWindowActivity(activity: OrchestrationThreadActivity
       ? (activity.payload as Record<string, unknown>)
       : null;
   const usedTokens = payload?.usedTokens;
-  return typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens >= 0;
+  if (typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens >= 0) {
+    return true;
+  }
+  const usedPercentage = payload?.usedPercentage;
+  return (
+    typeof usedPercentage === "number" && Number.isFinite(usedPercentage) && usedPercentage >= 0
+  );
 }
 
 /**

@@ -35,6 +35,8 @@ const entry = {
   createdAt: "2026-08-24T09:00:00.000Z",
   lastMessageAt: "2026-08-24T10:00:00.000Z",
   cwd: "/projects/repo",
+  projectId: "project-1",
+  projectTitle: "repo",
   alreadyImported: false,
   importable: true,
   hasCompactionSummary: false,
@@ -62,8 +64,12 @@ describe("AgentSessionScanResult", () => {
 });
 
 describe("AgentSessionListInput", () => {
-  it("requires the project whose sessions are listed", () => {
-    expect(() => decodeListInput({ limit: 15 })).toThrow();
+  it("allows omitting projectId for the Automatic all-projects list", () => {
+    expect(decodeListInput({ limit: 15 })).toEqual({ limit: 15 });
+  });
+
+  it("accepts a specific project whose sessions are listed", () => {
+    expect(decodeListInput({ projectId: "project-1" })).toEqual({ projectId: "project-1" });
   });
 
   it("accepts the paging limits the client steps through and ignores a provider filter", () => {
@@ -138,7 +144,7 @@ describe("AgentSessionListResult", () => {
     expect(result.filteredAlreadyImportedCount).toBe(4);
   });
 
-  it("requires createdAt, lastMessageAt, importable, and hasCompactionSummary on every entry", () => {
+  it("requires createdAt, lastMessageAt, importable, hasCompactionSummary, projectId, and projectTitle", () => {
     const {
       createdAt: _createdAt,
       lastMessageAt: _lastMessageAt,
@@ -147,6 +153,9 @@ describe("AgentSessionListResult", () => {
       ...incomplete
     } = entry;
     expect(() => decodeListResult({ entries: [incomplete], providerErrors: [] })).toThrow();
+
+    const { projectId: _projectId, projectTitle: _projectTitle, ...withoutProject } = entry;
+    expect(() => decodeListResult({ entries: [withoutProject], providerErrors: [] })).toThrow();
   });
 
   it("accepts native contextUsagePercent alone without used or max tokens", () => {

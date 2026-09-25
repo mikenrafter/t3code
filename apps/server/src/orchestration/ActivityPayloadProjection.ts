@@ -502,9 +502,10 @@ export function projectActivityPayload(
 
 /**
  * Matches the validity rule in the web client's
- * `deriveLatestContextWindowSnapshot`: rows without a finite, non-negative
- * `usedTokens` are skipped during its backward walk, so they must not shadow
- * an earlier resolvable row here.
+ * `deriveLatestContextWindowSnapshot`: rows need a finite, non-negative
+ * `usedTokens` and/or native `usedPercentage`. Malformed rows are skipped
+ * during its backward walk, so they must not shadow an earlier resolvable
+ * row here.
  */
 function isResolvableContextWindowActivity(activity: OrchestrationThreadActivity): boolean {
   if (activity.kind !== "context-window.updated") {
@@ -512,7 +513,13 @@ function isResolvableContextWindowActivity(activity: OrchestrationThreadActivity
   }
   const payload = asRecord(activity.payload);
   const usedTokens = payload?.usedTokens;
-  return typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens >= 0;
+  if (typeof usedTokens === "number" && Number.isFinite(usedTokens) && usedTokens >= 0) {
+    return true;
+  }
+  const usedPercentage = payload?.usedPercentage;
+  return (
+    typeof usedPercentage === "number" && Number.isFinite(usedPercentage) && usedPercentage >= 0
+  );
 }
 
 /**

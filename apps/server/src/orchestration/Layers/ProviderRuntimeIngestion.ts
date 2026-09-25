@@ -321,10 +321,22 @@ function reasoningSegmentBaseKeyFromEvent(
 function buildContextWindowActivityPayload(
   event: ProviderRuntimeEvent,
 ): ThreadTokenUsageSnapshot | undefined {
-  if (event.type !== "thread.token-usage.updated" || event.payload.usage.usedTokens < 0) {
+  if (event.type !== "thread.token-usage.updated") {
     return undefined;
   }
-  return event.payload.usage;
+  const usage = event.payload.usage;
+  // Accept absolute token fill and/or a native percent (Cursor composerData).
+  // Never invent the missing side from the other.
+  const hasUsedTokens =
+    usage.usedTokens !== undefined && Number.isFinite(usage.usedTokens) && usage.usedTokens >= 0;
+  const hasUsedPercentage =
+    usage.usedPercentage !== undefined &&
+    Number.isFinite(usage.usedPercentage) &&
+    usage.usedPercentage >= 0;
+  if (!hasUsedTokens && !hasUsedPercentage) {
+    return undefined;
+  }
+  return usage;
 }
 
 function compactedTokenCountsFromActivities(

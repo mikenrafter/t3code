@@ -1,4 +1,9 @@
-import type { AgentSessionEntry, AgentSessionSource } from "@t3tools/contracts";
+import type {
+  AgentSessionEntry,
+  AgentSessionSource,
+  EnvironmentId,
+  ProjectId,
+} from "@t3tools/contracts";
 
 import { formatContextWindowTokens } from "../../lib/contextWindow";
 import { normalizeSearchText } from "../../lib/utils";
@@ -9,6 +14,46 @@ export const PAGE_LIMITS = [15, 45, 90, 200] as const;
 export type PageLimit = (typeof PAGE_LIMITS)[number];
 
 export type ProviderFilter = "all" | AgentSessionSource;
+
+/** ImportThreadSheet-local: list sessions across every project on the server. */
+export const IMPORT_THREAD_PROJECT_AUTOMATIC = "automatic" as const;
+
+export type ImportThreadProjectSelection =
+  | typeof IMPORT_THREAD_PROJECT_AUTOMATIC
+  | `${EnvironmentId}:${ProjectId}`;
+
+export function isAutomaticImportProjectSelection(
+  selection: string | null,
+): selection is typeof IMPORT_THREAD_PROJECT_AUTOMATIC {
+  return selection === IMPORT_THREAD_PROJECT_AUTOMATIC;
+}
+
+/**
+ * Environment used for the Automatic list RPC: primary when set, else the first
+ * project's environment.
+ */
+export function resolveImportListEnvironmentId(input: {
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly projects: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+}): EnvironmentId | null {
+  return input.primaryEnvironmentId ?? input.projects[0]?.environmentId ?? null;
+}
+
+/**
+ * Destination project for attach: entry's project when Automatic, else the
+ * picker selection.
+ */
+export function resolveImportAttachProject<T extends { readonly id: ProjectId }>(input: {
+  readonly automatic: boolean;
+  readonly entryProjectId: ProjectId;
+  readonly projects: ReadonlyArray<T>;
+  readonly selectedProject: T | null;
+}): T | null {
+  if (input.automatic) {
+    return input.projects.find((project) => project.id === input.entryProjectId) ?? null;
+  }
+  return input.selectedProject;
+}
 
 export type ImportThreadEmptyState =
   | { readonly kind: "no-recent" }

@@ -20,15 +20,15 @@ import {
   ChevronDownIcon,
   FolderPlusIcon,
   InboxIcon,
+  LayersIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { useRouter } from "@tanstack/react-router";
 
 import { openCommandPalette } from "../../commandPaletteBus";
-import { useComposerDraftStore } from "../../composerDraftStore";
 import { useClientSettings } from "../../hooks/useSettings";
 import { useNowMinute } from "../../hooks/useNowMinute";
 import { selectProjectGroupingSettings } from "../../logicalProject";
@@ -40,15 +40,11 @@ import {
 import { cn } from "../../lib/utils";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { agentSessionAttach, agentSessionList } from "../../state/agentSessions";
-import { useProjects, useThreadShell, useThreadShells } from "../../state/entities";
+import { useProjects, useThreadShells } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
-import {
-  buildThreadRouteParams,
-  resolveActiveThreadRouteRef,
-  resolveThreadRouteTarget,
-} from "../../threadRoutes";
+import { buildThreadRouteParams } from "../../threadRoutes";
 import { getDriverOption } from "../settings/providerDriverMeta";
 import { ProjectEnvironmentBadge } from "../ProjectEnvironmentBadge";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -71,6 +67,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
   DEFAULT_IMPORT_HISTORY_MODE,
+  IMPORT_THREAD_PROJECT_AUTOMATIC,
   PAGE_LIMITS,
   computeImportThreadEmptyState,
   filterImportThreadEntries,
@@ -78,10 +75,13 @@ import {
   formatImportThreadTimeParts,
   importThreadEmptyStateMessage,
   importThreadRowBlockedReason,
+  isAutomaticImportProjectSelection,
   isImportThreadRowDisabled,
   nextPageLimit,
   providerLabel,
-  resolveDefaultImportProject,
+  resolveImportAttachProject,
+  resolveImportListEnvironmentId,
+  type ImportThreadProjectSelection,
   type ProviderFilter,
 } from "./importThreadSheet.logic";
 
@@ -116,7 +116,7 @@ export function ImportThreadSheetHost() {
 
 function ImportThreadSheet({
   open,
-  initialRequest,
+  initialRequest: _initialRequest,
   onOpenChange,
 }: {
   readonly open: boolean;
@@ -131,80 +131,40 @@ function ImportThreadSheet({
   const projectSortOrder = useClientSettings((settings) => settings.sidebarProjectSortOrder);
   const router = useRouter();
   const nowMinute = useNowMinute();
-  const routeTarget = useParams({
-    strict: false,
-    select: (params) => resolveThreadRouteTarget(params),
-  });
-  const routeDraftThread = useComposerDraftStore((store) =>
-    routeTarget?.kind === "draft" ? store.getDraftSession(routeTarget.draftId) : null,
-  );
-  const routeThreadRef = useMemo(
-    () => resolveActiveThreadRouteRef(routeTarget, routeDraftThread),
-    [routeDraftThread, routeTarget],
-  );
-  const activeThread = useThreadShell(routeThreadRef);
   const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
 
-  const preferredProject = useMemo(() => {
-    if (initialRequest.projectId === undefined || initialRequest.environmentId === undefined) {
-      return null;
-    }
-    return (
-      projects.find(
-        (project) =>
-          project.id === initialRequest.projectId &&
-          project.environmentId === initialRequest.environmentId,
-      ) ?? null
-    );
-  }, [initialRequest.environmentId, initialRequest.projectId, projects]);
-
-  const activeThreadProject = useMemo(() => {
-    if (!activeThread) return null;
-    return (
-      projects.find(
-        (project) =>
-          project.id === activeThread.projectId &&
-          project.environmentId === activeThread.environmentId,
-      ) ?? null
-    );
-  }, [activeThread, projects]);
-
-  const defaultProject = useMemo(
-    () =>
-      resolveDefaultImportProject({
-        preferred: preferredProject,
-        activeThreadProject,
-        projects,
-      }),
-    [activeThreadProject, preferredProject, projects],
+  const [selectedKey, setSelectedKey] = useState<ImportThreadProjectSelection>(
+    IMPORT_THREAD_PROJECT_AUTOMATIC,
   );
-
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [useCompaction, setUseCompaction] = useState(DEFAULT_IMPORT_HISTORY_MODE === "compaction");
   const [query, setQuery] = useState("");
   const [provider, setProvider] = useState<ProviderFilter>("all");
   const [limit, setLimit] = useState<number>(PAGE_LIMITS[0]);
   const [attachingKey, setAttachingKey] = useState<string | null>(null);
 
+  const automatic = isAutomaticImportProjectSelection(selectedKey);
+
   const selectedProject = useMemo(() => {
-    if (selectedKey !== null) {
-      const match = projects.find(
-        (project) => `${project.environmentId}:${project.id}` === selectedKey,
-      );
-      if (match) return match;
-    }
-    return defaultProject;
-  }, [defaultProject, projects, selectedKey]);
+    if (automatic) return null;
+    return (
+      projects.find((project) => `${project.environmentId}:${project.id}` === selectedKey) ?? null
+    );
+  }, [automatic, projects, selectedKey]);
 
   useEffect(() => {
     if (!open) return;
-    setSelectedKey(defaultProject ? `${defaultProject.environmentId}:${defaultProject.id}` : null);
+    setSelectedKey(IMPORT_THREAD_PROJECT_AUTOMATIC);
     setUseCompaction(DEFAULT_IMPORT_HISTORY_MODE === "compaction");
     setQuery("");
     setProvider("all");
     setLimit(PAGE_LIMITS[0]);
     setAttachingKey(null);
-  }, [defaultProject, open]);
+  }, [open]);
+
+  const listEnvironmentId = useMemo(() => {
+    if (selectedProject) return selectedProject.environmentId;
+    return resolveImportListEnvironmentId({ primaryEnvironmentId, projects });
+  }, [primaryEnvironmentId, projects, selectedProject]);
 
   const environmentLabelById = useMemo(
     () =>
@@ -277,11 +237,26 @@ function ImportThreadSheet({
             (projectRef) => scopedProjectKey(projectRef) === scopedProjectKey(selectedProjectRef),
           ),
         ) ?? null);
-  const selectedProjectKey = selectedProjectGroup?.projectKey ?? "";
-  const selectedProjectDisplayName =
-    selectedProjectGroup?.displayName ?? selectedProject?.title ?? null;
+  const selectedProjectKey = automatic
+    ? IMPORT_THREAD_PROJECT_AUTOMATIC
+    : (selectedProjectGroup?.projectKey ?? "");
+  const selectedProjectDisplayName = automatic
+    ? "Automatic"
+    : (selectedProjectGroup?.displayName ?? selectedProject?.title ?? null);
+
+  const projectById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project] as const)),
+    [projects],
+  );
 
   const listAtom = useMemo(() => {
+    if (!listEnvironmentId) return null;
+    if (automatic) {
+      return agentSessionList({
+        environmentId: listEnvironmentId,
+        input: { limit },
+      });
+    }
     if (!selectedProject) return null;
     return agentSessionList({
       environmentId: selectedProject.environmentId,
@@ -291,7 +266,7 @@ function ImportThreadSheet({
         limit,
       },
     });
-  }, [limit, selectedProject]);
+  }, [automatic, limit, listEnvironmentId, selectedProject]);
 
   const listQuery = useEnvironmentQuery(listAtom);
   const attachSession = useAtomCommand(agentSessionAttach, { reportFailure: false });
@@ -327,18 +302,26 @@ function ImportThreadSheet({
     (listQuery.data?.truncated === true || (listQuery.data?.entries.length ?? 0) >= limit);
 
   const providerErrors = listQuery.data?.providerErrors ?? [];
+  const canList =
+    listEnvironmentId !== null && (automatic ? projects.length > 0 : selectedProject !== null);
 
   const handleAttach = useCallback(
     async (entry: AgentSessionEntry) => {
-      if (!selectedProject) return;
+      const destination = resolveImportAttachProject({
+        automatic,
+        entryProjectId: entry.projectId,
+        projects,
+        selectedProject,
+      });
+      if (!destination) return;
       if (isImportThreadRowDisabled(entry)) return;
       const rowKey = `${entry.providerInstanceId}:${entry.providerSessionId}`;
       setAttachingKey(rowKey);
       const result = await attachSession({
-        environmentId: selectedProject.environmentId,
+        environmentId: destination.environmentId,
         input: {
-          projectId: selectedProject.id,
-          expectedWorkspaceRoot: selectedProject.workspaceRoot,
+          projectId: destination.id,
+          expectedWorkspaceRoot: destination.workspaceRoot,
           providerInstanceId: entry.providerInstanceId,
           providerSessionId: entry.providerSessionId,
           historyMode: useCompaction ? "compaction" : "full",
@@ -362,12 +345,21 @@ function ImportThreadSheet({
       await router.navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(
-          scopeThreadRef(selectedProject.environmentId, result.value.threadId),
+          scopeThreadRef(destination.environmentId, result.value.threadId),
         ),
       });
       void listQuery.refresh();
     },
-    [attachSession, listQuery, onOpenChange, router, selectedProject, useCompaction],
+    [
+      attachSession,
+      automatic,
+      listQuery,
+      onOpenChange,
+      projects,
+      router,
+      selectedProject,
+      useCompaction,
+    ],
   );
 
   return (
@@ -387,80 +379,96 @@ function ImportThreadSheet({
             >
               Attach a recent Claude, Codex, or Cursor session into this project.
             </label>
-            <Menu>
-              <MenuTrigger
-                id="import-thread-project"
-                disabled={projectPickerEntries.length === 0}
-                className={cn(
-                  "relative inline-flex w-full min-w-0 cursor-pointer select-none items-center justify-between gap-1.5 rounded-lg border border-input bg-background text-left text-base text-foreground shadow-xs/5 outline-none transition-[color,box-shadow,background-color]",
-                  "min-h-8 px-[calc(--spacing(2.5)-1px)] sm:min-h-7 sm:text-sm",
-                  "focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
-                  "disabled:pointer-events-none disabled:opacity-64",
-                  "dark:bg-input/32",
-                )}
-              >
-                <span className="flex min-w-0 flex-1 items-center gap-2">
-                  {selectedProjectGroup ? (
-                    <ProjectFavicon project={selectedProjectGroup} className="size-4 shrink-0" />
-                  ) : null}
-                  <span className="truncate">
-                    {selectedProjectDisplayName ?? "Select a project"}
-                  </span>
-                </span>
-                <ChevronDownIcon className="-me-1 size-3 shrink-0 opacity-50" />
-              </MenuTrigger>
-              <MenuPopup align="start" className="max-h-80 w-[var(--anchor-width)] overflow-y-auto">
-                <MenuRadioGroup
-                  value={selectedProjectKey}
-                  onValueChange={(value) => {
-                    const entry = projectEntryByKey.get(value as string);
-                    if (!entry || value === selectedProjectKey) return;
-                    const project = entry.targetProject;
-                    setSelectedKey(`${project.environmentId}:${project.id}`);
-                  }}
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+                <Checkbox
+                  checked={useCompaction}
+                  onCheckedChange={(checked) => setUseCompaction(checked === true)}
+                />
+                Use compacted chats
+              </label>
+              <Menu>
+                <MenuTrigger
+                  id="import-thread-project"
+                  disabled={projectPickerEntries.length === 0}
+                  className={cn(
+                    "relative inline-flex w-auto shrink cursor-pointer select-none items-center justify-between gap-1.5 rounded-lg border border-input bg-background text-left text-base text-foreground shadow-xs/5 outline-none transition-[color,box-shadow,background-color]",
+                    "min-h-8 px-[calc(--spacing(2.5)-1px)] sm:min-h-7 sm:text-sm",
+                    "focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24",
+                    "disabled:pointer-events-none disabled:opacity-64",
+                    "dark:bg-input/32",
+                  )}
                 >
-                  {projectPickerEntries.map(({ group }) => (
+                  <span className="flex min-w-0 items-center gap-2">
+                    {automatic ? (
+                      <LayersIcon className="size-4 shrink-0 text-muted-foreground" />
+                    ) : selectedProjectGroup ? (
+                      <ProjectFavicon project={selectedProjectGroup} className="size-4 shrink-0" />
+                    ) : null}
+                    <span className="truncate">
+                      {selectedProjectDisplayName ?? "Select a project"}
+                    </span>
+                  </span>
+                  <ChevronDownIcon className="-me-1 size-3 shrink-0 opacity-50" />
+                </MenuTrigger>
+                <MenuPopup align="start" className="max-h-80 w-max min-w-40 overflow-y-auto">
+                  <MenuRadioGroup
+                    value={selectedProjectKey}
+                    onValueChange={(value) => {
+                      if (value === IMPORT_THREAD_PROJECT_AUTOMATIC) {
+                        setSelectedKey(IMPORT_THREAD_PROJECT_AUTOMATIC);
+                        return;
+                      }
+                      const entry = projectEntryByKey.get(value as string);
+                      if (!entry || value === selectedProjectKey) return;
+                      const project = entry.targetProject;
+                      setSelectedKey(`${project.environmentId}:${project.id}`);
+                    }}
+                  >
                     <MenuRadioItem
-                      key={group.projectKey}
-                      value={group.projectKey}
+                      value={IMPORT_THREAD_PROJECT_AUTOMATIC}
                       closeOnClick
                       className="[&>span:last-child]:flex [&>span:last-child]:min-w-0 [&>span:last-child]:items-center [&>span:last-child]:gap-2"
                     >
-                      <ProjectFavicon project={group} className="size-4 shrink-0" />
-                      <Tooltip>
-                        <TooltipTrigger render={<span className="block min-w-0 truncate" />}>
-                          {group.displayName}
-                        </TooltipTrigger>
-                        <TooltipPopup side="top" className="max-w-80">
-                          {group.displayName}
-                        </TooltipPopup>
-                      </Tooltip>
-                      {showProjectEnvironments ? (
-                        <ProjectEnvironmentBadge
-                          group={group}
-                          primaryEnvironmentId={primaryEnvironmentId}
-                          machineByEnvironmentId={environmentMachineById}
-                        />
-                      ) : null}
+                      <LayersIcon className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="truncate">Automatic</span>
                     </MenuRadioItem>
-                  ))}
-                </MenuRadioGroup>
-                <MenuSeparator />
-                <MenuItem onClick={openAddProject}>
-                  <FolderPlusIcon />
-                  New project
-                </MenuItem>
-              </MenuPopup>
-            </Menu>
+                    <MenuSeparator />
+                    {projectPickerEntries.map(({ group }) => (
+                      <MenuRadioItem
+                        key={group.projectKey}
+                        value={group.projectKey}
+                        closeOnClick
+                        className="[&>span:last-child]:flex [&>span:last-child]:min-w-0 [&>span:last-child]:items-center [&>span:last-child]:gap-2"
+                      >
+                        <ProjectFavicon project={group} className="size-4 shrink-0" />
+                        <Tooltip>
+                          <TooltipTrigger render={<span className="block min-w-0 truncate" />}>
+                            {group.displayName}
+                          </TooltipTrigger>
+                          <TooltipPopup side="top" className="max-w-80">
+                            {group.displayName}
+                          </TooltipPopup>
+                        </Tooltip>
+                        {showProjectEnvironments ? (
+                          <ProjectEnvironmentBadge
+                            group={group}
+                            primaryEnvironmentId={primaryEnvironmentId}
+                            machineByEnvironmentId={environmentMachineById}
+                          />
+                        ) : null}
+                      </MenuRadioItem>
+                    ))}
+                  </MenuRadioGroup>
+                  <MenuSeparator />
+                  <MenuItem onClick={openAddProject}>
+                    <FolderPlusIcon />
+                    New project
+                  </MenuItem>
+                </MenuPopup>
+              </Menu>
+            </div>
           </div>
-
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
-            <Checkbox
-              checked={useCompaction}
-              onCheckedChange={(checked) => setUseCompaction(checked === true)}
-            />
-            Use compaction summaries instead of older history
-          </label>
 
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative min-w-0 flex-1">
@@ -509,7 +517,7 @@ function ImportThreadSheet({
               size="icon-sm"
               variant="ghost"
               aria-label="Refresh sessions"
-              disabled={!selectedProject || listQuery.isPending}
+              disabled={!canList || listQuery.isPending}
               onClick={() => listQuery.refresh()}
             >
               <RefreshCwIcon className={cn(listQuery.isPending && "opacity-50")} />
@@ -545,7 +553,7 @@ function ImportThreadSheet({
             </div>
           ) : null}
 
-          {!selectedProject ? (
+          {!canList ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Add a project before importing threads.
             </p>
@@ -572,7 +580,9 @@ function ImportThreadSheet({
                 void nowMinute;
                 const timeParts = formatImportThreadTimeParts(entry);
                 const contextParts = formatImportThreadContextParts(entry);
+                const entryProject = projectById.get(entry.projectId);
                 const metaParts = [
+                  entry.projectTitle,
                   providerLabel(entry.provider),
                   timeParts.createdLabel,
                   timeParts.lastMessageLabel,
@@ -610,8 +620,11 @@ function ImportThreadSheet({
                           </span>
                         ) : null}
                         {metaParts.length > 0 ? (
-                          <span className="mt-1 text-[11px] text-muted-foreground/80">
-                            {metaParts.join(" · ")}
+                          <span className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground/80">
+                            {entryProject ? (
+                              <ProjectFavicon project={entryProject} className="size-3 shrink-0" />
+                            ) : null}
+                            <span className="min-w-0 truncate">{metaParts.join(" · ")}</span>
                           </span>
                         ) : null}
                       </span>
@@ -625,7 +638,7 @@ function ImportThreadSheet({
             </ul>
           )}
 
-          {canLoadMore && emptyState === null && selectedProject ? (
+          {canLoadMore && emptyState === null && canList ? (
             <Button
               type="button"
               variant="outline"

@@ -227,6 +227,29 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
   });
+
+  it("accepts native usedPercentage alone without inventing usedTokens", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "thread.token-usage.updated",
+      eventId: "event-token-usage-percent",
+      provider: "cursor",
+      createdAt: "2026-02-28T00:00:05.000Z",
+      threadId: "thread-1",
+      payload: {
+        usage: {
+          usedPercentage: 66.2265,
+        },
+      },
+    });
+
+    expect(parsed.type).toBe("thread.token-usage.updated");
+    if (parsed.type !== "thread.token-usage.updated") {
+      throw new Error("expected thread.token-usage.updated");
+    }
+    expect(parsed.payload.usage.usedPercentage).toBe(66.2265);
+    expect(parsed.payload.usage.usedTokens).toBeUndefined();
+    expect(parsed.payload.usage.maxTokens).toBeUndefined();
+  });
 });
 
 describe("classifyTaskAgentKind", () => {
