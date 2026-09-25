@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
-import { DatabaseSync } from "node:sqlite";
+import * as NodeSqlite from "node:sqlite";
 import { describe, expect, it } from "@effect/vitest";
 import {
   type OrchestrationProjectShell,
@@ -2694,7 +2694,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           limit: 15,
         });
 
-        expect(page.descriptors).toEqual([
+        expect(page.descriptors).toMatchObject([
           {
             source: "claudeAgent",
             providerInstanceId: "claudeAgent",
@@ -2782,7 +2782,12 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Skipped"]);
         expect(page.descriptors).toMatchObject([
-          { providerSessionId: "record-limit-session", promptPreview: "First prompt" },
+          {
+            providerSessionId: "record-limit-session",
+            promptPreview: "First prompt",
+            importable: false,
+            importBlockedReason: expect.stringMatching(/record|limit|oversized|too large/i),
+          },
         ]);
       }),
     );
@@ -2904,7 +2909,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           limit: 15,
         });
 
-        expect(page.descriptors).toEqual([
+        expect(page.descriptors).toMatchObject([
           {
             source: "claudeAgent",
             providerInstanceId: "claudeAgent",
@@ -2925,6 +2930,10 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           readonly agentId: string;
           readonly name: string;
           readonly createdAt: number;
+          readonly lastUpdatedAt?: number;
+          readonly composerData?: {
+            readonly contextUsagePercent?: number;
+          };
           readonly subagentInfo?: {
             readonly parentAgentId: string;
             readonly rootParentAgentId: string;
@@ -2937,7 +2946,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const path = yield* Path.Path;
         yield* fileSystem.makeDirectory(path.dirname(input.storeDbPath), { recursive: true });
         yield* Effect.sync(() => {
-          const db = new DatabaseSync(input.storeDbPath);
+          const db = new NodeSqlite.DatabaseSync(input.storeDbPath);
           try {
             db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
             const hex = Buffer.from(JSON.stringify(input.meta), "utf8").toString("hex");
@@ -3059,7 +3068,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           limit: 15,
         });
 
-        expect(page.descriptors).toEqual([
+        expect(page.descriptors).toMatchObject([
           {
             source: "cursor",
             providerInstanceId: "cursor",
@@ -3144,6 +3153,278 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         });
       }),
     );
+
+    it.effect(
+      "lists a Cursor session whose user_query exceeds the old 1500-char preview filter",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-descriptor-long-cursor-claude-");
+          const codexHomePath = yield* makeTempDir("t3code-descriptor-long-cursor-codex-");
+          const cursorHomePath = yield* makeTempDir("t3code-descriptor-long-cursor-home-");
+          const workspace = yield* makeTempDir("t3code-descriptor-long-cursor-workspace-");
+          const agentId = "55555555-5555-4555-8555-555555555555";
+          const slug = AgentSessionScanner.cursorProjectSlug(workspace);
+          const chatHash = AgentSessionScanner.cursorChatDirectoryHash(workspace);
+          const longPrompt = `Please review this patch carefully.\n${"x".repeat(1_600)}`;
+
+          yield* writeTranscript({
+            filePath: path.join(
+              cursorHomePath,
+              "projects",
+              slug,
+              "agent-transcripts",
+              agentId,
+              `${agentId}.jsonl`,
+            ),
+            contents: encodeTranscriptRecord({
+              role: "user",
+              message: {
+                content: [{ type: "text", text: `<user_query>\n${longPrompt}\n</user_query>` }],
+              },
+            }),
+            mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+          });
+          yield* writeCursorChatMeta({
+            storeDbPath: path.join(cursorHomePath, "chats", chatHash, agentId, "store.db"),
+            meta: {
+              agentId,
+              name: "Long Cursor prompt",
+              createdAt: Date.parse("2026-08-24T10:50:00.000Z"),
+            },
+          });
+
+          const page = yield* runRecentSessionDescriptors({
+            claudeHomePath,
+            codexHomePath,
+            cursorHomePath,
+            workspaceRoot: workspace,
+            limit: 15,
+          });
+
+          expect(page.descriptors).toHaveLength(1);
+          expect(page.descriptors[0]).toMatchObject({
+            providerSessionId: agentId,
+            title: "Long Cursor prompt",
+          });
+          expect(page.descriptors[0]?.promptPreview).toContain(
+            "Please review this patch carefully",
+          );
+        }),
+    );
+
+    it.effect(
+      "reads Cursor composerData contextUsagePercent and createdAt without inventing token counts",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-descriptor-cursor-pct-claude-");
+          const codexHomePath = yield* makeTempDir("t3code-descriptor-cursor-pct-codex-");
+          const cursorHomePath = yield* makeTempDir("t3code-descriptor-cursor-pct-home-");
+          const workspace = yield* makeTempDir("t3code-descriptor-cursor-pct-workspace-");
+          const agentId = "66666666-6666-4666-8666-666666666666";
+          const slug = AgentSessionScanner.cursorProjectSlug(workspace);
+          const chatHash = AgentSessionScanner.cursorChatDirectoryHash(workspace);
+          const createdAtMs = Date.parse("2026-08-24T10:50:00.000Z");
+          const lastUpdatedAtMs = Date.parse("2026-08-24T11:05:00.000Z");
+
+          yield* writeTranscript({
+            filePath: path.join(
+              cursorHomePath,
+              "projects",
+              slug,
+              "agent-transcripts",
+              agentId,
+              `${agentId}.jsonl`,
+            ),
+            contents: [
+              encodeTranscriptRecord({
+                role: "user",
+                message: {
+                  content: [
+                    { type: "text", text: "<user_query>\nMeter the import\n</user_query>" },
+                  ],
+                },
+              }),
+              encodeTranscriptRecord({
+                role: "assistant",
+                message: { content: [{ type: "text", text: "Noted" }] },
+              }),
+            ].join("\n"),
+            mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+          });
+          yield* writeCursorChatMeta({
+            storeDbPath: path.join(cursorHomePath, "chats", chatHash, agentId, "store.db"),
+            meta: {
+              agentId,
+              name: "Cursor percent",
+              createdAt: createdAtMs,
+              lastUpdatedAt: lastUpdatedAtMs,
+              composerData: { contextUsagePercent: 37 },
+            },
+          });
+
+          const page = yield* runRecentSessionDescriptors({
+            claudeHomePath,
+            codexHomePath,
+            cursorHomePath,
+            workspaceRoot: workspace,
+            limit: 15,
+          });
+
+          expect(page.descriptors).toHaveLength(1);
+          expect(page.descriptors[0]).toMatchObject({
+            providerSessionId: agentId,
+            contextUsagePercent: 37,
+            createdAt: "2026-08-24T10:50:00.000Z",
+            lastMessageAt: "2026-08-24T11:05:00.000Z",
+          });
+          expect(page.descriptors[0]?.contextUsedTokens).toBeUndefined();
+          expect(page.descriptors[0]?.contextMaxTokens).toBeUndefined();
+        }),
+    );
+
+    it.effect("does not title Codex sessions from leading recommended_plugins scaffolding", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-codex-plugins-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-codex-plugins-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-codex-plugins-workspace-");
+        // Real Codex scaffolding is long but low tag-density, so today's
+        // isUsableListPreviewText still accepts it as the session title.
+        const pluginsBlob =
+          "<recommended_plugins>\nHere is a list of plugins you should consider installing for this project. " +
+          "Please review each option carefully before enabling anything. ".repeat(12) +
+          "\n</recommended_plugins>";
+
+        yield* writeTranscript({
+          filePath: path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-codex-plugins.jsonl",
+          ),
+          contents: [
+            encodeTranscriptRecord({
+              type: "session_meta",
+              payload: { id: "codex-plugins", cwd: workspace },
+            }),
+            encodeTranscriptRecord({
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: pluginsBlob }],
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              payload: { type: "user_message", message: "Fix the overlay spinner" },
+            }),
+            encodeTranscriptRecord({
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Looking at the spinner." }],
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: nowMs,
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toHaveLength(1);
+        expect(page.descriptors[0]?.title).toBe("Fix the overlay spinner");
+        expect(page.descriptors[0]?.title).not.toMatch(/recommended_plugins/i);
+      }),
+    );
+
+    it.effect("marks Claude compaction presence and carries createdAt plus lastMessageAt", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-compact-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-compact-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-compact-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-selected", "compact-session.jsonl"),
+          contents: [
+            encodeTranscriptRecord({
+              type: "user",
+              cwd: workspace,
+              sessionId: "compact-session",
+              timestamp: "2026-08-24T10:00:00.000Z",
+              message: { role: "user", content: "First prompt" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              sessionId: "compact-session",
+              timestamp: "2026-08-24T10:01:00.000Z",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "Old reply" }],
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "user",
+              sessionId: "compact-session",
+              timestamp: "2026-08-24T10:02:00.000Z",
+              isCompactSummary: true,
+              message: { role: "user", content: "Summary of earlier work" },
+            }),
+            encodeTranscriptRecord({
+              type: "user",
+              sessionId: "compact-session",
+              timestamp: "2026-08-24T10:03:00.000Z",
+              message: { role: "user", content: "Continue after compact" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              sessionId: "compact-session",
+              timestamp: "2026-08-24T10:04:00.000Z",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "Continuing" }],
+              },
+            }),
+          ].join("\n"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toHaveLength(1);
+        expect(page.descriptors[0]).toMatchObject({
+          providerSessionId: "compact-session",
+          hasCompactionSummary: true,
+          createdAt: "2026-08-24T10:00:00.000Z",
+          lastMessageAt: "2026-08-24T10:04:00.000Z",
+          importable: true,
+        });
+      }),
+    );
   });
 });
 
@@ -3214,6 +3495,8 @@ describe("parseAgentSessionTranscript", () => {
       providerInstanceId: ProviderInstanceId.make("claudeAgent"),
       fallbackSessionId: "fallback",
       lastActiveAtMs: Date.parse("2026-08-24T12:00:00.000Z"),
+      // Explicit full: default compaction would keep the compact-summary record.
+      historyMode: "full",
     });
 
     expect(thread).toMatchObject({
@@ -3752,5 +4035,82 @@ describe("parseAgentSessionTranscript", () => {
     expect(thread?.messages).toHaveLength(200);
     expect(thread?.messages[0]?.text).toBe("Keep this prompt");
     expect(thread?.messages.at(-1)?.text).toBe("Assistant update 249");
+  });
+
+  const claudeCompactionFixture = [
+    encodeTranscriptRecord({
+      type: "user",
+      sessionId: "claude-compact",
+      timestamp: "2026-08-24T10:00:00.000Z",
+      message: { role: "user", content: "First prompt" },
+    }),
+    encodeTranscriptRecord({
+      type: "assistant",
+      sessionId: "claude-compact",
+      timestamp: "2026-08-24T10:01:00.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "Old reply" }] },
+    }),
+    encodeTranscriptRecord({
+      type: "user",
+      sessionId: "claude-compact",
+      timestamp: "2026-08-24T10:02:00.000Z",
+      message: { role: "user", content: "Second prompt" },
+    }),
+    encodeTranscriptRecord({
+      type: "user",
+      sessionId: "claude-compact",
+      timestamp: "2026-08-24T10:03:00.000Z",
+      isCompactSummary: true,
+      message: { role: "user", content: "Summary of earlier work" },
+    }),
+    encodeTranscriptRecord({
+      type: "user",
+      sessionId: "claude-compact",
+      timestamp: "2026-08-24T10:04:00.000Z",
+      message: { role: "user", content: "Continue after compact" },
+    }),
+    encodeTranscriptRecord({
+      type: "assistant",
+      sessionId: "claude-compact",
+      timestamp: "2026-08-24T10:05:00.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "Continuing" }] },
+    }),
+  ].join("\n");
+
+  it("historyMode compaction keeps the compact summary and drops older pre-summary history except first user", () => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: claudeCompactionFixture,
+      source: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      fallbackSessionId: "fallback",
+      lastActiveAtMs: Date.parse("2026-08-24T12:00:00.000Z"),
+      historyMode: "compaction",
+    });
+
+    expect(thread?.messages.map((message) => message.text)).toEqual([
+      "First prompt",
+      "Summary of earlier work",
+      "Continue after compact",
+      "Continuing",
+    ]);
+  });
+
+  it("historyMode full skips isCompactSummary and keeps older messages up to the cap", () => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: claudeCompactionFixture,
+      source: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      fallbackSessionId: "fallback",
+      lastActiveAtMs: Date.parse("2026-08-24T12:00:00.000Z"),
+      historyMode: "full",
+    });
+
+    expect(thread?.messages.map((message) => message.text)).toEqual([
+      "First prompt",
+      "Old reply",
+      "Second prompt",
+      "Continue after compact",
+      "Continuing",
+    ]);
   });
 });

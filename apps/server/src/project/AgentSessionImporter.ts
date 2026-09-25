@@ -5,10 +5,12 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   AgentSessionAttachDeletedThreadError,
+  AgentSessionImportBlockedError,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
   AgentSessionScanError,
   AgentSessionUnavailableError,
+  EventId,
   isImportedAgentSessionMessageId,
   MessageId,
   ProjectId,
@@ -116,6 +118,28 @@ function hasImportBlockingActivity(
   );
 }
 
+/** Independent context fields from a session descriptor — never cross-derive percent ↔ tokens. */
+type ImportContextWindowSeed = {
+  readonly contextUsedTokens?: number;
+  readonly contextMaxTokens?: number;
+  readonly contextUsagePercent?: number;
+};
+
+function buildImportContextWindowPayload(
+  context: ImportContextWindowSeed | undefined,
+): Record<string, number> | null {
+  if (context === undefined) return null;
+  const payload: Record<string, number> = {
+    ...(context.contextUsedTokens !== undefined ? { usedTokens: context.contextUsedTokens } : {}),
+    ...(context.contextMaxTokens !== undefined ? { maxTokens: context.contextMaxTokens } : {}),
+    // Native provider percent only — map to activity usedPercentage for the client meter.
+    ...(context.contextUsagePercent !== undefined
+      ? { usedPercentage: context.contextUsagePercent }
+      : {}),
+  };
+  return Object.keys(payload).length > 0 ? payload : null;
+}
+
 const resolveImportProject = Effect.fn("resolveImportProject")(function* (input: {
   readonly projectId: ProjectId;
   readonly expectedWorkspaceRoot?: string;
@@ -150,6 +174,7 @@ const importDiscoveredSession = Effect.fn("importDiscoveredSession")(function* (
   readonly workspaceRoot: string;
   readonly thread: AgentSessionScanner.AgentSessionThread;
   readonly source: AgentSessionImportSource;
+  readonly context?: ImportContextWindowSeed;
 }) {
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -267,6 +292,28 @@ const importDiscoveredSession = Effect.fn("importDiscoveredSession")(function* (
         createdAt: message.createdAt,
       })),
     });
+
+    // Seed a turnless context-window activity from known descriptor fields only —
+    // never derive percent from used/max or invent tokens from a native percent.
+    const contextPayload = buildImportContextWindowPayload(input.context);
+    if (contextPayload !== null) {
+      const createdAt = new Date().toISOString();
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(yield* crypto.randomUUIDv4),
+        threadId,
+        activity: {
+          id: EventId.make(yield* crypto.randomUUIDv4),
+          tone: "info",
+          kind: "context-window.updated",
+          summary: "Context window updated",
+          payload: contextPayload,
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+    }
   }
 
   yield* directory.recordImportedTranscript({ threadId, source: input.source });
@@ -407,8 +454,24 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
       title: descriptor.title,
       promptPreview: descriptor.promptPreview,
       lastActiveAt: descriptor.lastActiveAt,
+      createdAt: descriptor.createdAt ?? descriptor.lastActiveAt,
+      lastMessageAt: descriptor.lastMessageAt ?? descriptor.lastActiveAt,
       cwd: descriptor.cwd,
       alreadyImported: false,
+      ...(descriptor.contextMaxTokens !== undefined
+        ? { contextMaxTokens: descriptor.contextMaxTokens }
+        : {}),
+      ...(descriptor.contextUsedTokens !== undefined
+        ? { contextUsedTokens: descriptor.contextUsedTokens }
+        : {}),
+      ...(descriptor.contextUsagePercent !== undefined
+        ? { contextUsagePercent: descriptor.contextUsagePercent }
+        : {}),
+      importable: descriptor.importable ?? true,
+      ...(descriptor.importBlockedReason !== undefined
+        ? { importBlockedReason: descriptor.importBlockedReason }
+        : {}),
+      hasCompactionSummary: descriptor.hasCompactionSummary ?? false,
     });
   }
 
@@ -533,8 +596,18 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
           providerSessionId: input.providerSessionId,
         });
       }
+      if (matchingDescriptor.importable === false) {
+        return yield* new AgentSessionImportBlockedError({
+          providerInstanceId: input.providerInstanceId,
+          providerSessionId: input.providerSessionId,
+          importBlockedReason:
+            matchingDescriptor.importBlockedReason ??
+            "Session transcript exceeds the import record limit",
+        });
+      }
 
-      const outcomes = yield* scanner.recentThreads(workspaceRoot).pipe(
+      const historyMode = input.historyMode ?? "compaction";
+      const outcomes = yield* scanner.recentThreads(workspaceRoot, undefined, { historyMode }).pipe(
         Stream.runCollect,
         Effect.map((chunk) => Array.from(chunk)),
       );
@@ -556,6 +629,18 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
         workspaceRoot,
         thread: importable.thread,
         source: importable.source,
+        // Re-read from the list descriptor: recentThreads carries messages, not context meta.
+        context: {
+          ...(matchingDescriptor.contextUsedTokens !== undefined
+            ? { contextUsedTokens: matchingDescriptor.contextUsedTokens }
+            : {}),
+          ...(matchingDescriptor.contextMaxTokens !== undefined
+            ? { contextMaxTokens: matchingDescriptor.contextMaxTokens }
+            : {}),
+          ...(matchingDescriptor.contextUsagePercent !== undefined
+            ? { contextUsagePercent: matchingDescriptor.contextUsagePercent }
+            : {}),
+        },
       });
     }),
   );

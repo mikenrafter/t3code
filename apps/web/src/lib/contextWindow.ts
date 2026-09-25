@@ -18,7 +18,9 @@ type NullableContextWindowUsage = {
     : ThreadTokenUsageSnapshot[Key];
 };
 
-export type ContextWindowSnapshot = NullableContextWindowUsage & {
+export type ContextWindowSnapshot = Omit<NullableContextWindowUsage, "usedTokens"> & {
+  /** Null when the activity carried only a native percent (no token counts). */
+  readonly usedTokens: number | null;
   readonly remainingTokens: number | null;
   readonly usedPercentage: number | null;
   readonly remainingPercentage: number | null;
@@ -35,16 +37,27 @@ export function deriveLatestContextWindowSnapshot(
     }
 
     const payload = asRecord(activity.payload);
-    const usedTokens = asFiniteNumber(payload?.usedTokens);
-    if (usedTokens === null || usedTokens < 0) {
+    const usedTokensRaw = asFiniteNumber(payload?.usedTokens);
+    const usedTokens = usedTokensRaw !== null && usedTokensRaw >= 0 ? usedTokensRaw : null;
+    const nativeUsedPercentage = asFiniteNumber(payload?.usedPercentage);
+    const hasNativePercent = nativeUsedPercentage !== null && nativeUsedPercentage >= 0;
+    // Import may seed Cursor's native percent alone; accept that without inventing tokens.
+    if (usedTokens === null && !hasNativePercent) {
       continue;
     }
 
     const maxTokens = asFiniteNumber(payload?.maxTokens);
-    const usedPercentage =
-      maxTokens !== null && maxTokens > 0 ? Math.min(100, (usedTokens / maxTokens) * 100) : null;
+    // Prefer a native percent when present; otherwise derive for the meter from used/max.
+    // Never invent the reverse (tokens from percent, or a seeded percent from used/max).
+    const derivedPercentage =
+      usedTokens !== null && maxTokens !== null && maxTokens > 0
+        ? Math.min(100, (usedTokens / maxTokens) * 100)
+        : null;
+    const usedPercentage = hasNativePercent ? nativeUsedPercentage : derivedPercentage;
     const remainingTokens =
-      maxTokens !== null ? Math.max(0, Math.round(maxTokens - usedTokens)) : null;
+      usedTokens !== null && maxTokens !== null
+        ? Math.max(0, Math.round(maxTokens - usedTokens))
+        : null;
     const remainingPercentage = usedPercentage !== null ? Math.max(0, 100 - usedPercentage) : null;
 
     return {

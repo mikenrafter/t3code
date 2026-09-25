@@ -118,6 +118,12 @@ export const AgentSessionListInput = Schema.Struct({
 });
 export type AgentSessionListInput = typeof AgentSessionListInput.Type;
 
+/** Native provider percent (0–100). Never derived from used/max on the wire. */
+export const AgentSessionContextUsagePercent = Schema.Number.check(
+  Schema.isBetween({ minimum: 0, maximum: 100 }),
+);
+export type AgentSessionContextUsagePercent = typeof AgentSessionContextUsagePercent.Type;
+
 export const AgentSessionEntry = Schema.Struct({
   provider: AgentSessionSource,
   providerInstanceId: ProviderInstanceId,
@@ -125,10 +131,34 @@ export const AgentSessionEntry = Schema.Struct({
   title: TrimmedNonEmptyString,
   promptPreview: TrimmedNonEmptyString,
   lastActiveAt: IsoDateTime,
+  /** When the session was created, when the provider exposes it. */
+  createdAt: IsoDateTime,
+  /** Timestamp of the latest retained message (or last activity). */
+  lastMessageAt: IsoDateTime,
   cwd: TrimmedNonEmptyString,
   alreadyImported: Schema.Boolean,
+  /** Max context window size when the provider reports it. */
+  contextMaxTokens: Schema.optional(NonNegativeInt),
+  /** Last known used tokens when the provider reports it. */
+  contextUsedTokens: Schema.optional(NonNegativeInt),
+  /**
+   * Native context usage percent from the provider (e.g. Cursor
+   * `composerData.contextUsagePercent`). Present alone without used/max is valid;
+   * used+max without percent is also valid. Do not derive this from used/max.
+   */
+  contextUsagePercent: Schema.optional(AgentSessionContextUsagePercent),
+  /** False when the row is listed but cannot be attached (e.g. oversized). */
+  importable: Schema.Boolean,
+  /** Present when `importable === false`. */
+  importBlockedReason: Schema.optional(TrimmedNonEmptyString),
+  /** True when the transcript contains Claude `isCompactSummary` records. */
+  hasCompactionSummary: Schema.Boolean,
 });
 export type AgentSessionEntry = typeof AgentSessionEntry.Type;
+
+/** How much pre-compaction history to retain when attaching a session. */
+export const AgentSessionHistoryMode = Schema.Literals(["compaction", "full"]);
+export type AgentSessionHistoryMode = typeof AgentSessionHistoryMode.Type;
 
 export const AgentSessionProviderError = Schema.Struct({
   provider: AgentSessionSource,
@@ -154,6 +184,8 @@ export const AgentSessionAttachInput = Schema.Struct({
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   providerInstanceId: ProviderInstanceId,
   providerSessionId: TrimmedNonEmptyString,
+  /** Server defaults to `compaction` when omitted. */
+  historyMode: Schema.optional(AgentSessionHistoryMode),
 });
 export type AgentSessionAttachInput = typeof AgentSessionAttachInput.Type;
 
@@ -172,6 +204,20 @@ export class AgentSessionUnavailableError extends Schema.TaggedError<AgentSessio
 ) {
   override get message(): string {
     return `Session '${this.providerSessionId}' is no longer available from '${this.providerInstanceId}'.`;
+  }
+}
+
+/** Listed session that cannot be attached (oversized transcript, etc.). */
+export class AgentSessionImportBlockedError extends Schema.TaggedError<AgentSessionImportBlockedError>()(
+  "AgentSessionImportBlockedError",
+  {
+    providerInstanceId: ProviderInstanceId,
+    providerSessionId: TrimmedNonEmptyString,
+    importBlockedReason: TrimmedNonEmptyString,
+  },
+) {
+  override get message(): string {
+    return this.importBlockedReason;
   }
 }
 

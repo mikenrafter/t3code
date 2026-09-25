@@ -3,9 +3,14 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   PAGE_LIMITS,
+  DEFAULT_IMPORT_HISTORY_MODE,
   computeImportThreadEmptyState,
   filterImportThreadEntries,
+  formatImportThreadContextParts,
+  formatImportThreadTimeParts,
   importThreadEmptyStateMessage,
+  importThreadRowBlockedReason,
+  isImportThreadRowDisabled,
   nextPageLimit,
   providerLabel,
   resolveDefaultImportProject,
@@ -19,8 +24,12 @@ function entry(
     providerSessionId: overrides.title,
     promptPreview: overrides.promptPreview ?? "preview",
     lastActiveAt: overrides.lastActiveAt ?? "2026-09-25T00:00:00.000Z",
+    createdAt: overrides.createdAt ?? "2026-09-24T00:00:00.000Z",
+    lastMessageAt: overrides.lastMessageAt ?? "2026-09-25T00:00:00.000Z",
     cwd: overrides.cwd ?? "/tmp/project",
     alreadyImported: overrides.alreadyImported ?? false,
+    importable: overrides.importable ?? true,
+    hasCompactionSummary: overrides.hasCompactionSummary ?? false,
     ...overrides,
   };
 }
@@ -191,5 +200,82 @@ describe("providerLabel", () => {
     expect(providerLabel("claudeAgent")).toBe("Claude");
     expect(providerLabel("codex")).toBe("Codex");
     expect(providerLabel("cursor")).toBe("Cursor");
+  });
+});
+
+describe("DEFAULT_IMPORT_HISTORY_MODE", () => {
+  it("defaults attach history to compaction", () => {
+    expect(DEFAULT_IMPORT_HISTORY_MODE).toBe("compaction");
+  });
+});
+
+describe("importThreadRowBlockedReason / isImportThreadRowDisabled", () => {
+  it("exposes the blocked reason for non-importable rows", () => {
+    const blocked = entry({
+      provider: "codex",
+      title: "Too large",
+      importable: false,
+      importBlockedReason: "Transcript exceeds the import record limit",
+    });
+    expect(importThreadRowBlockedReason(blocked)).toBe(
+      "Transcript exceeds the import record limit",
+    );
+    expect(isImportThreadRowDisabled(blocked)).toBe(true);
+  });
+
+  it("leaves importable rows enabled", () => {
+    const open = entry({ provider: "codex", title: "Ok", importable: true });
+    expect(importThreadRowBlockedReason(open)).toBeNull();
+    expect(isImportThreadRowDisabled(open)).toBe(false);
+  });
+});
+
+describe("formatImportThreadContextParts", () => {
+  it("formats max, used, and native percent independently", () => {
+    expect(
+      formatImportThreadContextParts({
+        contextMaxTokens: 200_000,
+        contextUsedTokens: 14_000,
+        contextUsagePercent: 37,
+      }),
+    ).toEqual({
+      maxLabel: expect.stringMatching(/200/),
+      usedLabel: expect.stringMatching(/14/),
+      percentLabel: expect.stringMatching(/37/),
+    });
+
+    expect(
+      formatImportThreadContextParts({
+        contextUsagePercent: 42,
+      }),
+    ).toEqual({
+      maxLabel: null,
+      usedLabel: null,
+      percentLabel: expect.stringMatching(/42/),
+    });
+
+    expect(
+      formatImportThreadContextParts({
+        contextUsedTokens: 8_000,
+        contextMaxTokens: 100_000,
+      }),
+    ).toEqual({
+      maxLabel: expect.stringMatching(/100/),
+      usedLabel: expect.stringMatching(/8/),
+      percentLabel: null,
+    });
+  });
+});
+
+describe("formatImportThreadTimeParts", () => {
+  it("formats createdAt and lastMessageAt for the row meta line", () => {
+    const parts = formatImportThreadTimeParts({
+      createdAt: "2026-08-20T12:00:00.000Z",
+      lastMessageAt: "2026-08-24T10:00:00.000Z",
+    });
+    expect(parts.createdLabel).toEqual(expect.any(String));
+    expect(parts.lastMessageLabel).toEqual(expect.any(String));
+    expect(parts.createdLabel).not.toBe("");
+    expect(parts.lastMessageLabel).not.toBe("");
   });
 });

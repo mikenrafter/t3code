@@ -32,8 +32,12 @@ const entry = {
   title: "Fix the bug",
   promptPreview: "Fix the bug in the importer",
   lastActiveAt: "2026-08-24T10:00:00.000Z",
+  createdAt: "2026-08-24T09:00:00.000Z",
+  lastMessageAt: "2026-08-24T10:00:00.000Z",
   cwd: "/projects/repo",
   alreadyImported: false,
+  importable: true,
+  hasCompactionSummary: false,
 } as const;
 
 describe("AgentSessionScanResult", () => {
@@ -134,6 +138,73 @@ describe("AgentSessionListResult", () => {
     expect(result.filteredAlreadyImportedCount).toBe(4);
   });
 
+  it("requires createdAt, lastMessageAt, importable, and hasCompactionSummary on every entry", () => {
+    const {
+      createdAt: _createdAt,
+      lastMessageAt: _lastMessageAt,
+      importable: _importable,
+      hasCompactionSummary: _hasCompactionSummary,
+      ...incomplete
+    } = entry;
+    expect(() => decodeListResult({ entries: [incomplete], providerErrors: [] })).toThrow();
+  });
+
+  it("accepts native contextUsagePercent alone without used or max tokens", () => {
+    const result = decodeListResult({
+      entries: [{ ...entry, contextUsagePercent: 42 }],
+      providerErrors: [],
+    });
+    expect(result.entries[0]).toMatchObject({
+      contextUsagePercent: 42,
+    });
+    expect(result.entries[0]?.contextUsedTokens).toBeUndefined();
+    expect(result.entries[0]?.contextMaxTokens).toBeUndefined();
+  });
+
+  it("accepts context used+max without a native percent (client derives %)", () => {
+    const result = decodeListResult({
+      entries: [{ ...entry, contextUsedTokens: 14_000, contextMaxTokens: 200_000 }],
+      providerErrors: [],
+    });
+    expect(result.entries[0]).toMatchObject({
+      contextUsedTokens: 14_000,
+      contextMaxTokens: 200_000,
+    });
+    expect(result.entries[0]?.contextUsagePercent).toBeUndefined();
+  });
+
+  it("rejects a contextUsagePercent outside 0–100", () => {
+    expect(() =>
+      decodeListResult({
+        entries: [{ ...entry, contextUsagePercent: 101 }],
+        providerErrors: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeListResult({
+        entries: [{ ...entry, contextUsagePercent: -1 }],
+        providerErrors: [],
+      }),
+    ).toThrow();
+  });
+
+  it("carries importBlockedReason when importable is false", () => {
+    const result = decodeListResult({
+      entries: [
+        {
+          ...entry,
+          importable: false,
+          importBlockedReason: "Transcript exceeds the import record limit",
+        },
+      ],
+      providerErrors: [],
+    });
+    expect(result.entries[0]).toMatchObject({
+      importable: false,
+      importBlockedReason: "Transcript exceeds the import record limit",
+    });
+  });
+
   it("reports a per-provider failure beside the entries that did load", () => {
     const result = decodeListResult({
       entries: [entry],
@@ -173,6 +244,36 @@ describe("AgentSessionAttachInput", () => {
   it("requires the provider session to attach", () => {
     expect(() =>
       decodeAttachInput({ projectId: "project-1", providerInstanceId: "codex" }),
+    ).toThrow();
+  });
+
+  it("accepts optional historyMode compaction or full", () => {
+    expect(
+      decodeAttachInput({
+        projectId: "project-1",
+        providerInstanceId: "codex",
+        providerSessionId: "codex-session",
+        historyMode: "compaction",
+      }),
+    ).toMatchObject({ historyMode: "compaction" });
+    expect(
+      decodeAttachInput({
+        projectId: "project-1",
+        providerInstanceId: "codex",
+        providerSessionId: "codex-session",
+        historyMode: "full",
+      }),
+    ).toMatchObject({ historyMode: "full" });
+  });
+
+  it("rejects an unknown historyMode", () => {
+    expect(() =>
+      decodeAttachInput({
+        projectId: "project-1",
+        providerInstanceId: "codex",
+        providerSessionId: "codex-session",
+        historyMode: "summary",
+      }),
     ).toThrow();
   });
 });

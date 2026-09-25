@@ -32,6 +32,7 @@ import {
   AgentSessionAttachDeletedThreadError,
   AgentSessionAttachInput,
   AgentSessionAttachResult,
+  AgentSessionImportBlockedError,
   AgentSessionImportInput,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
@@ -998,6 +999,7 @@ const WsAgentSessionsAttachRpc = Rpc.make(WS_METHODS.agentSessionsAttach, {
   success: AgentSessionAttachResult,
   error: Schema.Union([
     AgentSessionAttachDeletedThreadError,
+    AgentSessionImportBlockedError,
     AgentSessionUnavailableError,
     AgentSessionImportProjectChangedError,
     AgentSessionImportProjectNotFoundError,

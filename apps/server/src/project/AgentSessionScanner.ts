@@ -17,9 +17,9 @@
  *
  * @module project/AgentSessionScanner
  */
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
-import { DatabaseSync } from "node:sqlite";
+import * as NodeSqlite from "node:sqlite";
 
 import {
   AgentSessionScanError,
@@ -190,6 +190,17 @@ export interface AgentSessionDescriptor {
   readonly promptPreview: string;
   readonly lastActiveAt: string;
   readonly cwd: string;
+  /** Session creation time when the provider exposes it. */
+  readonly createdAt?: string;
+  /** Latest message / activity time when known. */
+  readonly lastMessageAt?: string;
+  readonly contextMaxTokens?: number;
+  readonly contextUsedTokens?: number;
+  /** Native provider percent only — never derived from used/max. */
+  readonly contextUsagePercent?: number;
+  readonly importable?: boolean;
+  readonly importBlockedReason?: string;
+  readonly hasCompactionSummary?: boolean;
 }
 
 /** One provider home that could not be read, so the rest of the list still shows. */
@@ -228,6 +239,7 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      options?: { readonly historyMode?: "compaction" | "full" },
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
     /**
      * Newest-first descriptors for sessions that ran in `workspaceRoot`, read
@@ -255,6 +267,9 @@ interface RawCandidate {
     readonly mtimeMs: number | null;
     /** Cursor chat meta `name`, when the store.db row is readable. */
     readonly titleOverride?: string;
+    readonly createdAtMs?: number;
+    readonly lastUpdatedAtMs?: number;
+    readonly contextUsagePercent?: number;
   }>;
 }
 
@@ -320,14 +335,13 @@ function stripUserQueryWrapper(text: string): string {
 }
 
 /**
- * Skip the huge system / environment dumps CLIs sometimes write as the first
- * "user" record so Import previews stay legible. Real prompts are usually short
- * and not mostly XML scaffolding.
+ * Skip system / environment dumps and harness scaffolding CLIs sometimes write
+ * as the first "user" record so Import previews stay legible. Long real prompts
+ * are fine — only reject dumps and tag-heavy scaffolding.
  */
 function isUsableListPreviewText(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length === 0) return false;
-  if (trimmed.length > 1_500) return false;
   const lower = trimmed.toLowerCase();
   if (
     lower.startsWith("<user_info") ||
@@ -336,6 +350,8 @@ function isUsableListPreviewText(text: string): boolean {
     lower.startsWith("<agent_transcripts") ||
     lower.startsWith("<runtime_info") ||
     lower.startsWith("<pull_request_linking") ||
+    lower.startsWith("<recommended_plugins") ||
+    lower.includes("<recommended_plugins") ||
     lower.startsWith("# system") ||
     lower.startsWith("you are ") ||
     (lower.includes("claude.md") && trimmed.length > 400)
@@ -363,19 +379,22 @@ export function cursorProjectSlug(cwd: string): string {
 
 /** Cursor chat meta directory key: `md5(cwd)` under `~/.cursor/chats`. */
 export function cursorChatDirectoryHash(cwd: string): string {
-  return createHash("md5").update(cwd).digest("hex");
+  return NodeCrypto.createHash("md5").update(cwd).digest("hex");
 }
 
 interface CursorChatMeta {
   readonly name: string | null;
   readonly createdAtMs: number | null;
+  readonly lastUpdatedAtMs: number | null;
+  /** Native percent from `composerData` — never invent used/max from this. */
+  readonly contextUsagePercent: number | null;
   readonly isSubagent: boolean;
 }
 
-/** Read title / subagent flag from `chats/<md5>/<agentId>/store.db` without spawning cursor-agent. */
+/** Read title / usage / subagent flag from `chats/<md5>/<agentId>/store.db` without spawning cursor-agent. */
 function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
   try {
-    const db = new DatabaseSync(storeDbPath, { readOnly: true });
+    const db = new NodeSqlite.DatabaseSync(storeDbPath, { readOnly: true });
     try {
       const row = db.prepare("SELECT value FROM meta WHERE key = ?").get("0") as
         | { readonly value: string | Uint8Array }
@@ -392,6 +411,10 @@ function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
       const parsed = JSON.parse(jsonText) as {
         readonly name?: unknown;
         readonly createdAt?: unknown;
+        readonly lastUpdatedAt?: unknown;
+        readonly composerData?: {
+          readonly contextUsagePercent?: unknown;
+        };
         readonly subagentInfo?: unknown;
       };
       const name =
@@ -402,9 +425,23 @@ function readCursorChatMeta(storeDbPath: string): CursorChatMeta | null {
         typeof parsed.createdAt === "number" && Number.isFinite(parsed.createdAt)
           ? parsed.createdAt
           : null;
+      const lastUpdatedAtMs =
+        typeof parsed.lastUpdatedAt === "number" && Number.isFinite(parsed.lastUpdatedAt)
+          ? parsed.lastUpdatedAt
+          : null;
+      const rawPercent = parsed.composerData?.contextUsagePercent;
+      const contextUsagePercent =
+        typeof rawPercent === "number" &&
+        Number.isFinite(rawPercent) &&
+        rawPercent >= 0 &&
+        rawPercent <= 100
+          ? rawPercent
+          : null;
       return {
         name,
         createdAtMs,
+        lastUpdatedAtMs,
+        contextUsagePercent,
         isSubagent: parsed.subagentInfo != null,
       };
     } finally {
@@ -437,6 +474,12 @@ function codexTurnId(metadata: unknown): string | null {
 export function parseAgentSessionTranscript(
   input: AgentSessionTranscriptMetadata & {
     readonly contents: string;
+    /**
+     * `compaction` keeps compact-summary records and drops older pre-summary
+     * history (except the first user message). `full` skips compact summaries
+     * and retains older messages up to the import cap. Defaults to compaction.
+     */
+    readonly historyMode?: "compaction" | "full";
   },
   lines = splitTranscriptRecords(input.contents, MAX_IMPORT_RECORDS + 1),
 ): AgentSessionThread | null {
@@ -445,10 +488,18 @@ export function parseAgentSessionTranscript(
   return parseAgentSessionRecords(input, records);
 }
 
+type ParsedSessionMessage = AgentSessionThreadMessage & {
+  readonly codexResponseUser: boolean;
+  readonly isCompactSummary: boolean;
+};
+
 function parseAgentSessionRecords(
-  input: AgentSessionTranscriptMetadata,
+  input: AgentSessionTranscriptMetadata & {
+    readonly historyMode?: "compaction" | "full";
+  },
   records: ReadonlyArray<DecodedTranscriptRecord>,
 ): AgentSessionThread | null {
+  const historyMode = input.historyMode ?? "compaction";
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
   // timestamp text, so only transcript metadata can provide a resumable ID.
@@ -456,10 +507,8 @@ function parseAgentSessionRecords(
   let title: string | null = null;
   let model: string | null = null;
   let hasCodexSessionId = false;
-  const messages: Array<AgentSessionThreadMessage & { readonly codexResponseUser: boolean }> = [];
-  let firstUserMessage:
-    | (AgentSessionThreadMessage & { readonly codexResponseUser: boolean })
-    | undefined;
+  const messages: Array<ParsedSessionMessage> = [];
+  let firstUserMessage: ParsedSessionMessage | undefined;
   // A Codex response item can include generated setup text beside the real
   // prompt. Suppress response-user records only when the shared turn ID and a
   // verbatim event copy prove which prompt the user submitted.
@@ -516,9 +565,7 @@ function parseAgentSessionRecords(
     finishCodexTurn();
   }
 
-  const retainMessage = (
-    message: AgentSessionThreadMessage & { readonly codexResponseUser: boolean },
-  ) => {
+  const retainMessage = (message: ParsedSessionMessage) => {
     if (firstUserMessage === undefined && message.role === "user") {
       firstUserMessage = message;
     }
@@ -560,15 +607,16 @@ function parseAgentSessionRecords(
         text,
         createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
         codexResponseUser: false,
+        isCompactSummary: false,
       });
       continue;
     }
     if (input.source === "claudeAgent") {
-      if (
-        record.isSidechain === true ||
-        record.isMeta === true ||
-        record.isCompactSummary === true
-      ) {
+      if (record.isSidechain === true || record.isMeta === true) {
+        continue;
+      }
+      const isCompactSummary = record.isCompactSummary === true;
+      if (isCompactSummary && historyMode === "full") {
         continue;
       }
       if (record.sessionId?.trim()) providerSessionId = record.sessionId.trim();
@@ -588,6 +636,7 @@ function parseAgentSessionRecords(
         text,
         createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
         codexResponseUser: false,
+        isCompactSummary,
       });
       continue;
     }
@@ -624,6 +673,7 @@ function parseAgentSessionRecords(
         text,
         createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
         codexResponseUser: false,
+        isCompactSummary: false,
       });
       continue;
     }
@@ -648,18 +698,41 @@ function parseAgentSessionRecords(
       text: extractedText,
       createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
       codexResponseUser: record.payload.role === "user",
+      isCompactSummary: false,
     });
   }
 
-  const visibleMessages = messages.map(
-    ({ codexResponseUser: _codexResponseUser, ...message }) => message,
-  );
   if (providerSessionId.trim().length === 0 || firstUserMessage === undefined) return null;
   const firstUserMessageRetained = messages.includes(firstUserMessage);
-  const { codexResponseUser: _codexResponseUser, ...visibleFirstUserMessage } = firstUserMessage;
-  const retainedMessages = firstUserMessageRetained
-    ? visibleMessages
-    : [visibleFirstUserMessage, ...visibleMessages.slice(-(MAX_IMPORTED_MESSAGES - 1))];
+  let retainedInternal = firstUserMessageRetained
+    ? messages
+    : [firstUserMessage, ...messages.slice(-(MAX_IMPORTED_MESSAGES - 1))];
+
+  if (historyMode === "compaction") {
+    let lastCompactIndex = -1;
+    for (let index = retainedInternal.length - 1; index >= 0; index--) {
+      if (retainedInternal[index]?.isCompactSummary === true) {
+        lastCompactIndex = index;
+        break;
+      }
+    }
+    if (lastCompactIndex >= 0) {
+      const afterCompact = retainedInternal.slice(lastCompactIndex);
+      const firstUser = retainedInternal.find((message) => message.role === "user");
+      retainedInternal =
+        firstUser !== undefined && !afterCompact.includes(firstUser)
+          ? [firstUser, ...afterCompact]
+          : afterCompact;
+    }
+  }
+
+  const stripInternal = ({
+    codexResponseUser: _codexResponseUser,
+    isCompactSummary: _isCompactSummary,
+    ...message
+  }: ParsedSessionMessage): AgentSessionThreadMessage => message;
+  const retainedMessages = retainedInternal.map(stripInternal);
+  const visibleFirstUserMessage = stripInternal(firstUserMessage);
   const derivedTitle = visibleFirstUserMessage.text.trim().split("\n")[0]?.slice(0, 100).trim();
 
   return {
@@ -689,6 +762,8 @@ function extractDescriptorFields(
   readonly prompt: string | null;
   readonly assistantPreview: string | null;
   readonly title: string | null;
+  readonly timestamp: string | null;
+  readonly isCompactSummary: boolean;
 } {
   const empty = {
     cwd: null,
@@ -696,6 +771,8 @@ function extractDescriptorFields(
     prompt: null,
     assistantPreview: null,
     title: null,
+    timestamp: null,
+    isCompactSummary: false,
   } as const;
   let parsed: unknown;
   try {
@@ -706,6 +783,11 @@ function extractDescriptorFields(
   if (typeof parsed !== "object" || parsed === null) return empty;
   const record = parsed as DecodedTranscriptRecord;
   const cwd = extractDecodedCwd(record);
+  const timestamp =
+    typeof record.timestamp === "string" && record.timestamp.trim().length > 0
+      ? record.timestamp.trim()
+      : null;
+  const isCompactSummary = record.isCompactSummary === true;
   if (source === "cursor") {
     const sessionId = record.sessionId?.trim() || null;
     let prompt: string | null = null;
@@ -723,7 +805,7 @@ function extractDescriptorFields(
       const text = extractText(record.message?.content);
       if (isUsableListPreviewText(text)) assistantPreview = text;
     }
-    return { cwd, sessionId, prompt, assistantPreview, title: null };
+    return { cwd, sessionId, prompt, assistantPreview, title: null, timestamp, isCompactSummary };
   }
   if (source === "claudeAgent") {
     const sessionId = record.sessionId?.trim() || null;
@@ -739,7 +821,7 @@ function extractDescriptorFields(
         if (isUsableListPreviewText(text)) assistantPreview = text;
       }
     }
-    return { cwd, sessionId, prompt, assistantPreview, title };
+    return { cwd, sessionId, prompt, assistantPreview, title, timestamp, isCompactSummary };
   }
   let sessionId: string | null = null;
   if (record.type === "session_meta") {
@@ -758,7 +840,7 @@ function extractDescriptorFields(
       if (isUsableListPreviewText(text)) assistantPreview = text;
     }
   }
-  return { cwd, sessionId, prompt, assistantPreview, title: null };
+  return { cwd, sessionId, prompt, assistantPreview, title: null, timestamp, isCompactSummary };
 }
 
 function shouldRetainDecodedRecord(
@@ -1066,7 +1148,8 @@ export const make = Effect.gen(function* () {
 
   /**
    * Read just enough of a transcript to name the session and its first prompt.
-   * Stops early so oversized histories still appear in the session list.
+   * Continues within the forward budget for timestamps and compaction flags so
+   * oversized / compacted sessions still get accurate list polish fields.
    */
   const readDescriptorMeta = Effect.fn("AgentSessionScanner.readDescriptorMeta")(function* (
     source: AgentSessionSource,
@@ -1074,6 +1157,7 @@ export const make = Effect.gen(function* () {
   ) {
     if (transcript.size === 0) return null;
     const fallbackSessionId = path.basename(transcript.filePath, ".jsonl");
+    const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs));
     return yield* Effect.scoped(
       fileSystem.open(transcript.filePath, { flag: "r" }).pipe(
         Effect.flatMap((file) =>
@@ -1086,6 +1170,9 @@ export const make = Effect.gen(function* () {
             let prompt: string | null = null;
             let assistantPreview: string | null = null;
             let title: string | null = null;
+            let firstTimestamp: string | null = null;
+            let lastTimestamp: string | null = null;
+            let hasCompactionSummary = false;
             const maxBytes = Math.min(MAX_TRANSCRIPT_SCAN_BYTES, transcript.size);
 
             const consider = (line: string) => {
@@ -1096,9 +1183,12 @@ export const make = Effect.gen(function* () {
               if (fields.title !== null) title = fields.title;
               if (fields.prompt !== null && prompt === null) prompt = fields.prompt;
               if (fields.assistantPreview !== null) assistantPreview = fields.assistantPreview;
-              // Keep scanning while we still need a usable user prompt; assistant
-              // text can keep updating until the forward budget ends.
-              return sessionId.length > 0 && prompt !== null;
+              if (fields.isCompactSummary) hasCompactionSummary = true;
+              if (fields.timestamp !== null) {
+                const normalized = normalizeTimestamp(fields.timestamp, fallbackTimestamp);
+                if (firstTimestamp === null) firstTimestamp = normalized;
+                lastTimestamp = normalized;
+              }
             };
 
             while (bytesRead < maxBytes) {
@@ -1114,13 +1204,9 @@ export const make = Effect.gen(function* () {
                 const trimmed = line.trim();
                 if (trimmed.length === 0) continue;
                 recordsRead += 1;
-                if (consider(trimmed) && assistantPreview !== null) {
-                  // Have both a usable user prompt and an assistant preview.
-                  break;
-                }
+                consider(trimmed);
                 if (recordsRead >= MAX_METADATA_RECORDS_PER_TRANSCRIPT) break;
               }
-              if (sessionId.length > 0 && prompt !== null && assistantPreview !== null) break;
             }
 
             const last = (remaining + decoder.decode()).trim();
@@ -1132,8 +1218,12 @@ export const make = Effect.gen(function* () {
             // Prefer the last assistant reply for the list preview. The forward
             // window often stops at the first reply; the tail read catches the
             // latest usable agent text when the file is large enough to seek.
-            const tailAssistant = yield* readDescriptorTailAssistant(source, transcript);
-            if (tailAssistant !== null) assistantPreview = tailAssistant;
+            const tail = yield* readDescriptorTail(source, transcript);
+            if (tail.assistantPreview !== null) assistantPreview = tail.assistantPreview;
+            if (tail.lastTimestamp !== null) {
+              lastTimestamp = normalizeTimestamp(tail.lastTimestamp, fallbackTimestamp);
+            }
+            if (tail.hasCompactionSummary) hasCompactionSummary = true;
 
             if (sessionId.length === 0) return null;
             // Last agent response when we have one; otherwise the first usable
@@ -1144,6 +1234,9 @@ export const make = Effect.gen(function* () {
               providerSessionId: sessionId,
               promptPreview: truncatePreview(previewSource),
               title: truncatePreview(title ?? prompt ?? previewSource, 120),
+              createdAt: firstTimestamp ?? fallbackTimestamp,
+              lastMessageAt: lastTimestamp ?? firstTimestamp ?? fallbackTimestamp,
+              hasCompactionSummary,
             };
           }),
         ),
@@ -1151,38 +1244,84 @@ export const make = Effect.gen(function* () {
     ).pipe(Effect.orElseSucceed(() => null));
   });
 
-  /** Last usable assistant text from the end of a transcript, bounded. */
-  const readDescriptorTailAssistant = Effect.fn("AgentSessionScanner.readDescriptorTailAssistant")(
-    function* (
-      source: AgentSessionSource,
-      transcript: TranscriptCandidate & { readonly mtimeMs: number },
-    ) {
-      const tailByteCount = Math.min(METADATA_READ_BYTES * 4, transcript.size);
-      if (tailByteCount <= 0) return null;
-      // Effect's File.seek tracks position as bigint; pass bigint offsets.
-      const size = BigInt(transcript.size);
-      const tailBytes = BigInt(tailByteCount);
+  /**
+   * Last usable assistant text / timestamp / compaction flag from the end of a
+   * transcript, bounded.
+   */
+  const readDescriptorTail = Effect.fn("AgentSessionScanner.readDescriptorTail")(function* (
+    source: AgentSessionSource,
+    transcript: TranscriptCandidate & { readonly mtimeMs: number },
+  ) {
+    const empty = {
+      assistantPreview: null as string | null,
+      lastTimestamp: null as string | null,
+      hasCompactionSummary: false,
+    };
+    const tailByteCount = Math.min(METADATA_READ_BYTES * 4, transcript.size);
+    if (tailByteCount <= 0) return empty;
+    // Effect's File.seek tracks position as bigint; pass bigint offsets.
+    const size = BigInt(transcript.size);
+    const tailBytes = BigInt(tailByteCount);
+    return yield* Effect.scoped(
+      fileSystem.open(transcript.filePath, { flag: "r" }).pipe(
+        Effect.flatMap((file) =>
+          Effect.gen(function* () {
+            yield* file.seek(size - tailBytes, "start");
+            const chunk = yield* file.readAlloc(tailByteCount);
+            if (Option.isNone(chunk)) return empty;
+            const text = new TextDecoder().decode(chunk.value);
+            const lines = text.split("\n");
+            let assistantPreview: string | null = null;
+            let lastTimestamp: string | null = null;
+            let hasCompactionSummary = false;
+            // First line may be a partial JSONL record after the seek.
+            for (let index = 1; index < lines.length; index++) {
+              const trimmed = lines[index]?.trim() ?? "";
+              if (trimmed.length === 0) continue;
+              const fields = extractDescriptorFields(source, trimmed);
+              if (fields.assistantPreview !== null) assistantPreview = fields.assistantPreview;
+              if (fields.timestamp !== null) lastTimestamp = fields.timestamp;
+              if (fields.isCompactSummary) hasCompactionSummary = true;
+            }
+            return { assistantPreview, lastTimestamp, hasCompactionSummary };
+          }),
+        ),
+      ),
+    ).pipe(Effect.orElseSucceed(() => empty));
+  });
+
+  /** Count JSONL records up to `limit` without parsing JSON (newline-delimited). */
+  const countTranscriptRecordsUpTo = Effect.fn("AgentSessionScanner.countTranscriptRecordsUpTo")(
+    function* (filePath: string, size: number, limit: number) {
+      if (size === 0 || limit <= 0) return 0;
       return yield* Effect.scoped(
-        fileSystem.open(transcript.filePath, { flag: "r" }).pipe(
+        fileSystem.open(filePath, { flag: "r" }).pipe(
           Effect.flatMap((file) =>
             Effect.gen(function* () {
-              yield* file.seek(size - tailBytes, "start");
-              const chunk = yield* file.readAlloc(tailByteCount);
-              if (Option.isNone(chunk)) return null;
-              const text = new TextDecoder().decode(chunk.value);
-              const lines = text.split("\n");
-              // First line may be a partial JSONL record after the seek.
-              for (let index = lines.length - 1; index >= 1; index--) {
-                const trimmed = lines[index]?.trim() ?? "";
-                if (trimmed.length === 0) continue;
-                const fields = extractDescriptorFields(source, trimmed);
-                if (fields.assistantPreview !== null) return fields.assistantPreview;
+              let bytesRead = 0;
+              let count = 0;
+              let lineStarted = false;
+              while (bytesRead < size && count < limit) {
+                const readSize = Math.min(TRANSCRIPT_PREFIX_BYTES, size - bytesRead);
+                const next = yield* file.readAlloc(readSize);
+                if (Option.isNone(next)) break;
+                bytesRead += next.value.byteLength;
+                for (let index = 0; index < next.value.byteLength; index++) {
+                  lineStarted = true;
+                  if (next.value[index] === 10) {
+                    count += 1;
+                    lineStarted = false;
+                    if (count >= limit) return count;
+                  }
+                }
               }
-              return null;
+              // Match splitTranscriptRecords: a final line without trailing newline counts.
+              if (lineStarted && count < limit) count += 1;
+              return count;
             }),
           ),
         ),
-      ).pipe(Effect.orElseSucceed(() => null));
+      ).pipe(Effect.orElseSucceed(() => 0));
     },
   );
 
@@ -1570,7 +1709,13 @@ export const make = Effect.gen(function* () {
     const cwdVariants = root === realRoot ? [root] : [root, realRoot];
     const seenFiles = new Set<string>();
     const transcripts: Array<
-      TranscriptCandidate & { readonly titleOverride?: string; readonly cwd: string }
+      TranscriptCandidate & {
+        readonly titleOverride?: string;
+        readonly createdAtMs?: number;
+        readonly lastUpdatedAtMs?: number;
+        readonly contextUsagePercent?: number;
+        readonly cwd: string;
+      }
     > = [];
     let truncated = false;
     let providerError: string | null = null;
@@ -1628,6 +1773,13 @@ export const make = Effect.gen(function* () {
             providerInstanceId: home.providerInstanceId,
             size: Number(stats.value.size),
             ...(chatMeta?.name ? { titleOverride: chatMeta.name } : {}),
+            ...(chatMeta?.createdAtMs != null ? { createdAtMs: chatMeta.createdAtMs } : {}),
+            ...(chatMeta?.lastUpdatedAtMs != null
+              ? { lastUpdatedAtMs: chatMeta.lastUpdatedAtMs }
+              : {}),
+            ...(chatMeta?.contextUsagePercent != null
+              ? { contextUsagePercent: chatMeta.contextUsagePercent }
+              : {}),
             cwd: root,
           });
         }
@@ -1816,6 +1968,7 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    historyMode: "compaction" | "full" = "compaction",
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -1972,6 +2125,7 @@ export const make = Effect.gen(function* () {
               providerInstanceId: candidate.providerInstanceId,
               fallbackSessionId: path.basename(transcript.filePath, ".jsonl"),
               lastActiveAtMs: transcript.mtimeMs,
+              historyMode,
             },
             snapshot.records,
           );
@@ -2009,7 +2163,11 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    options,
+  ) =>
+    Stream.unwrap(
+      prepareRecentThreads(workspaceRoot, completedSources, options?.historyMode ?? "compaction"),
+    );
 
   const listRecentSessionDescriptors: AgentSessionScanner["Service"]["listRecentSessionDescriptors"] =
     Effect.fn("AgentSessionScanner.listRecentSessionDescriptors")(function* (
@@ -2081,6 +2239,13 @@ export const make = Effect.gen(function* () {
               filePath: transcript.filePath,
               mtimeMs: transcript.mtimeMs,
               ...(transcript.titleOverride ? { titleOverride: transcript.titleOverride } : {}),
+              ...(transcript.createdAtMs != null ? { createdAtMs: transcript.createdAtMs } : {}),
+              ...(transcript.lastUpdatedAtMs != null
+                ? { lastUpdatedAtMs: transcript.lastUpdatedAtMs }
+                : {}),
+              ...(transcript.contextUsagePercent != null
+                ? { contextUsagePercent: transcript.contextUsagePercent }
+                : {}),
             })),
           };
         },
@@ -2127,13 +2292,36 @@ export const make = Effect.gen(function* () {
         }
         const stats = yield* statOption(transcript.filePath);
         if (Option.isNone(stats) || stats.value.type !== "File") continue;
+        const fileSize = Number(stats.value.size);
         const meta = yield* readDescriptorMeta(candidate.source, {
           filePath: transcript.filePath,
           mtimeMs: transcript.mtimeMs,
           providerInstanceId: candidate.providerInstanceId,
-          size: Number(stats.value.size),
+          size: fileSize,
         });
         if (meta === null) continue;
+
+        const lastActiveAt = DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs));
+        const createdAt =
+          transcript.createdAtMs != null
+            ? DateTime.formatIso(DateTime.makeUnsafe(transcript.createdAtMs))
+            : meta.createdAt;
+        const lastMessageAt =
+          transcript.lastUpdatedAtMs != null
+            ? DateTime.formatIso(DateTime.makeUnsafe(transcript.lastUpdatedAtMs))
+            : meta.lastMessageAt;
+
+        const recordCount =
+          fileSize <= MAX_IMPORT_RECORDS
+            ? 0
+            : yield* countTranscriptRecordsUpTo(
+                transcript.filePath,
+                fileSize,
+                MAX_IMPORT_RECORDS + 1,
+              );
+        const importable = fileSize <= MAX_IMPORT_RECORDS || recordCount <= MAX_IMPORT_RECORDS;
+        const oversizedReason = "Session transcript exceeds the import record limit";
+
         descriptors.push({
           source: candidate.source,
           providerInstanceId: candidate.providerInstanceId,
@@ -2143,8 +2331,16 @@ export const make = Effect.gen(function* () {
               ? transcript.titleOverride.trim()
               : meta.title,
           promptPreview: meta.promptPreview,
-          lastActiveAt: DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs)),
+          lastActiveAt,
           cwd: candidate.cwd,
+          createdAt,
+          lastMessageAt,
+          ...(transcript.contextUsagePercent != null
+            ? { contextUsagePercent: transcript.contextUsagePercent }
+            : {}),
+          importable,
+          ...(importable ? {} : { importBlockedReason: oversizedReason }),
+          hasCompactionSummary: meta.hasCompactionSummary,
         });
       }
 

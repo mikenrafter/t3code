@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import {
   AgentSessionAttachDeletedThreadError,
+  AgentSessionImportBlockedError,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
   AgentSessionUnavailableError,
@@ -342,6 +343,7 @@ const runAttach = (input: {
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerSessionId?: string;
   readonly expectedWorkspaceRoot?: string;
+  readonly historyMode?: "compaction" | "full";
 }) =>
   attachAgentSession({
     projectId: PROJECT_ID,
@@ -350,6 +352,7 @@ const runAttach = (input: {
     ...(input.expectedWorkspaceRoot === undefined
       ? {}
       : { expectedWorkspaceRoot: input.expectedWorkspaceRoot }),
+    ...(input.historyMode === undefined ? {} : { historyMode: input.historyMode }),
   }).pipe(provideImporterServices(input));
 
 const runImport = (input: {
@@ -746,12 +749,58 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
               title: "Imported claudeAgent thread",
               promptPreview: "Fix the bug",
               lastActiveAt: "2026-08-24T10:01:00.000Z",
+              createdAt: "2026-08-24T10:01:00.000Z",
+              lastMessageAt: "2026-08-24T10:01:00.000Z",
               cwd: WORKSPACE_ROOT,
               alreadyImported: false,
+              importable: true,
+              hasCompactionSummary: false,
             },
           ],
           providerErrors: [],
           filteredAlreadyImportedCount: 1,
+        });
+      }),
+    );
+
+    it.effect("forwards polish list fields from discovery and still omits owned sessions", () =>
+      Effect.gen(function* () {
+        const codexThreadId = ThreadId.make("import:codex:codex-session");
+        const enrichedClaude: AgentSessionScanner.AgentSessionDescriptor = {
+          ...makeDescriptor("claudeAgent"),
+          createdAt: "2026-08-20T09:00:00.000Z",
+          lastMessageAt: "2026-08-24T10:01:00.000Z",
+          contextUsedTokens: 12_000,
+          contextMaxTokens: 200_000,
+          contextUsagePercent: 18,
+          importable: true,
+          hasCompactionSummary: true,
+        };
+        const result = yield* runList({
+          scanner: makeDescriptorScanner({
+            descriptors: [makeDescriptor("codex"), enrichedClaude],
+          }),
+          snapshots: makeSnapshotsLayer({
+            project: makeProject(),
+            getThread: (threadId) =>
+              threadId === codexThreadId
+                ? Option.some(makeProjectedThread({ source: "codex", imported: true }))
+                : Option.none(),
+          }),
+        });
+
+        expect(result.filteredAlreadyImportedCount).toBe(1);
+        expect(result.entries).toHaveLength(1);
+        expect(result.entries[0]).toMatchObject({
+          provider: "claudeAgent",
+          providerSessionId: CLAUDE_SESSION_ID,
+          createdAt: "2026-08-20T09:00:00.000Z",
+          lastMessageAt: "2026-08-24T10:01:00.000Z",
+          contextUsedTokens: 12_000,
+          contextMaxTokens: 200_000,
+          contextUsagePercent: 18,
+          importable: true,
+          hasCompactionSummary: true,
         });
       }),
     );
@@ -1042,6 +1091,284 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         expect(engine.commands.filter((command) => command.type === "thread.create")).toHaveLength(
           1,
         );
+      }),
+    );
+
+    const compactionClaudeThread = (): AgentSessionScanner.AgentSessionThread => ({
+      source: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      providerSessionId: CLAUDE_SESSION_ID,
+      title: "Continue after compact",
+      model: null,
+      createdAt: "2026-08-24T10:00:00.000Z",
+      updatedAt: "2026-08-24T10:05:00.000Z",
+      messages: [
+        { role: "user", text: "First prompt", createdAt: "2026-08-24T10:00:00.000Z" },
+        {
+          role: "user",
+          text: "Summary of earlier work",
+          createdAt: "2026-08-24T10:03:00.000Z",
+        },
+        {
+          role: "user",
+          text: "Continue after compact",
+          createdAt: "2026-08-24T10:04:00.000Z",
+        },
+        { role: "assistant", text: "Continuing", createdAt: "2026-08-24T10:05:00.000Z" },
+      ],
+    });
+
+    const fullClaudeThread = (): AgentSessionScanner.AgentSessionThread => ({
+      ...compactionClaudeThread(),
+      messages: [
+        { role: "user", text: "First prompt", createdAt: "2026-08-24T10:00:00.000Z" },
+        { role: "assistant", text: "Old reply", createdAt: "2026-08-24T10:01:00.000Z" },
+        { role: "user", text: "Second prompt", createdAt: "2026-08-24T10:02:00.000Z" },
+        {
+          role: "user",
+          text: "Continue after compact",
+          createdAt: "2026-08-24T10:04:00.000Z",
+        },
+        { role: "assistant", text: "Continuing", createdAt: "2026-08-24T10:05:00.000Z" },
+      ],
+    });
+
+    const makeHistoryModeScanner = () => {
+      const descriptor = makeDescriptor("claudeAgent");
+      return AgentSessionScanner.AgentSessionScanner.of({
+        scan: Effect.die("unused"),
+        listRecentSessionDescriptors: () =>
+          Effect.succeed({
+            descriptors: [descriptor],
+            providerErrors: [],
+            truncated: false,
+          }),
+        recentThreads: (_workspaceRoot, _completed, options) => {
+          // Attach must pass historyMode (defaulting to compaction). Until it
+          // does, this stream stays empty and attach fails — intentional red.
+          if (options?.historyMode === "compaction") {
+            return Stream.succeed(makeThreadOutcome(compactionClaudeThread()));
+          }
+          if (options?.historyMode === "full") {
+            return Stream.succeed(makeThreadOutcome(fullClaudeThread()));
+          }
+          return Stream.empty;
+        },
+      });
+    };
+
+    it.effect("attach historyMode compaction retains compact summary and drops older turns", () =>
+      Effect.gen(function* () {
+        const engine = makeRecordingEngine();
+        const result = yield* runAttach({
+          scanner: makeHistoryModeScanner(),
+          engine: engine.service,
+          snapshots: makeSnapshotsLayer({ project: makeProject() }),
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          providerSessionId: CLAUDE_SESSION_ID,
+          historyMode: "compaction",
+        });
+
+        expect(result.created).toBe(true);
+        const history = engine.commands.find((command) => command.type === "thread.history.import");
+        expect(history).toMatchObject({
+          type: "thread.history.import",
+          messages: [
+            { role: "user", text: "First prompt" },
+            { role: "user", text: "Summary of earlier work" },
+            { role: "user", text: "Continue after compact" },
+            { role: "assistant", text: "Continuing" },
+          ],
+        });
+      }),
+    );
+
+    it.effect(
+      "attach historyMode full keeps pre-compaction messages and skips compact summary",
+      () =>
+        Effect.gen(function* () {
+          const engine = makeRecordingEngine();
+          const result = yield* runAttach({
+            scanner: makeHistoryModeScanner(),
+            engine: engine.service,
+            snapshots: makeSnapshotsLayer({ project: makeProject() }),
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            providerSessionId: CLAUDE_SESSION_ID,
+            historyMode: "full",
+          });
+
+          expect(result.created).toBe(true);
+          const history = engine.commands.find(
+            (command) => command.type === "thread.history.import",
+          );
+          expect(history).toMatchObject({
+            type: "thread.history.import",
+            messages: [
+              { role: "user", text: "First prompt" },
+              { role: "assistant", text: "Old reply" },
+              { role: "user", text: "Second prompt" },
+              { role: "user", text: "Continue after compact" },
+              { role: "assistant", text: "Continuing" },
+            ],
+          });
+        }),
+    );
+
+    it.effect("defaults omitted historyMode to compaction when attaching", () =>
+      Effect.gen(function* () {
+        const engine = makeRecordingEngine();
+        const result = yield* runAttach({
+          scanner: makeHistoryModeScanner(),
+          engine: engine.service,
+          snapshots: makeSnapshotsLayer({ project: makeProject() }),
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          providerSessionId: CLAUDE_SESSION_ID,
+        });
+
+        expect(result.created).toBe(true);
+        const history = engine.commands.find((command) => command.type === "thread.history.import");
+        expect(history).toMatchObject({
+          messages: [
+            { role: "user", text: "First prompt" },
+            { role: "user", text: "Summary of earlier work" },
+            { role: "user", text: "Continue after compact" },
+            { role: "assistant", text: "Continuing" },
+          ],
+        });
+      }),
+    );
+
+    it.effect("refuses to attach a listed but non-importable session with its blocked reason", () =>
+      Effect.gen(function* () {
+        const blockedReason = "Transcript exceeds the import record limit";
+        const blockedDescriptor: AgentSessionScanner.AgentSessionDescriptor = {
+          ...makeDescriptor("codex"),
+          importable: false,
+          importBlockedReason: blockedReason,
+        };
+        const error = yield* runAttach({
+          scanner: AgentSessionScanner.AgentSessionScanner.of({
+            scan: Effect.die("unused"),
+            listRecentSessionDescriptors: () =>
+              Effect.succeed({
+                descriptors: [blockedDescriptor],
+                providerErrors: [],
+                truncated: false,
+              }),
+            // Today attach ignores importable and falls through to recentThreads.
+            // Returning empty makes the current path UnavailableError — polish
+            // must short-circuit with AgentSessionImportBlockedError instead.
+            recentThreads: () => Stream.empty,
+          }),
+          engine: makeRecordingEngine().service,
+          snapshots: makeSnapshotsLayer({ project: makeProject() }),
+        }).pipe(Effect.flip);
+
+        expect(error).toEqual(
+          new AgentSessionImportBlockedError({
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerSessionId: "codex-session",
+            importBlockedReason: blockedReason,
+          }),
+        );
+      }),
+    );
+
+    it.effect(
+      "seeds a turnless context-window.updated activity from used+max without a derived percent",
+      () =>
+        Effect.gen(function* () {
+          const engine = makeRecordingEngine();
+          const descriptor: AgentSessionScanner.AgentSessionDescriptor = {
+            ...makeDescriptor("codex"),
+            contextUsedTokens: 14_000,
+            contextMaxTokens: 200_000,
+          };
+          const thread = {
+            ...makeThread("codex"),
+          };
+          yield* runAttach({
+            scanner: AgentSessionScanner.AgentSessionScanner.of({
+              scan: Effect.die("unused"),
+              listRecentSessionDescriptors: () =>
+                Effect.succeed({
+                  descriptors: [descriptor],
+                  providerErrors: [],
+                  truncated: false,
+                }),
+              recentThreads: () => Stream.succeed(makeThreadOutcome(thread)),
+            }),
+            engine: engine.service,
+            snapshots: makeSnapshotsLayer({ project: makeProject() }),
+          });
+
+          const activity = engine.commands.find(
+            (command) =>
+              command.type === "thread.activity.append" &&
+              command.activity.kind === "context-window.updated",
+          );
+          expect(activity).toBeDefined();
+          expect(activity).toMatchObject({
+            type: "thread.activity.append",
+            activity: {
+              kind: "context-window.updated",
+              turnId: null,
+              payload: {
+                usedTokens: 14_000,
+                maxTokens: 200_000,
+              },
+            },
+          });
+          // Import must not invent a percent; the client meter derives it.
+          expect(
+            (activity as { activity: { payload: Record<string, unknown> } }).activity.payload,
+          ).not.toHaveProperty("usedPercentage");
+          expect(
+            (activity as { activity: { payload: Record<string, unknown> } }).activity.payload,
+          ).not.toHaveProperty("contextUsagePercent");
+        }),
+    );
+
+    it.effect("seeds context-window.updated from native percent alone for the meter", () =>
+      Effect.gen(function* () {
+        const engine = makeRecordingEngine();
+        const descriptor: AgentSessionScanner.AgentSessionDescriptor = {
+          ...makeDescriptor("cursor"),
+          contextUsagePercent: 37,
+        };
+        const thread = makeThread("cursor");
+        yield* runAttach({
+          scanner: AgentSessionScanner.AgentSessionScanner.of({
+            scan: Effect.die("unused"),
+            listRecentSessionDescriptors: () =>
+              Effect.succeed({
+                descriptors: [descriptor],
+                providerErrors: [],
+                truncated: false,
+              }),
+            recentThreads: () => Stream.succeed(makeThreadOutcome(thread)),
+          }),
+          engine: engine.service,
+          snapshots: makeSnapshotsLayer({ project: makeProject() }),
+          providerInstanceId: thread.providerInstanceId,
+          providerSessionId: thread.providerSessionId,
+        });
+
+        const activity = engine.commands.find(
+          (command) =>
+            command.type === "thread.activity.append" &&
+            command.activity.kind === "context-window.updated",
+        );
+        // Prefer payload.usedPercentage so deriveLatestContextWindowSnapshot can
+        // show the meter without inventing usedTokens (see contextWindow.test.ts).
+        expect(activity).toMatchObject({
+          type: "thread.activity.append",
+          activity: {
+            kind: "context-window.updated",
+            turnId: null,
+            payload: { usedPercentage: 37 },
+          },
+        });
       }),
     );
   });

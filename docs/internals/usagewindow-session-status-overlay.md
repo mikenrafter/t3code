@@ -20,7 +20,7 @@ Usagewindow, with these initial statuses:
   because a quota/window policy prevents safe continuation.
 
 T3 Code's existing native `monitoring` presentation remains unchanged. This
-  work does not rename or replace it with `watching`.
+work does not rename or replace it with `watching`.
 
 ## Generic status shape
 

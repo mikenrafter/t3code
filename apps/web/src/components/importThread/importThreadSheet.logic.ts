@@ -1,6 +1,8 @@
 import type { AgentSessionEntry, AgentSessionSource } from "@t3tools/contracts";
 
+import { formatContextWindowTokens } from "../../lib/contextWindow";
 import { normalizeSearchText } from "../../lib/utils";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
 
 /** Raised in steps as the user asks for more history. Filtering stays client-side. */
 export const PAGE_LIMITS = [15, 45, 90, 200] as const;
@@ -101,4 +103,63 @@ export function resolveDefaultImportProject<T>(input: {
   readonly projects: ReadonlyArray<T>;
 }): T | null {
   return input.preferred ?? input.activeThreadProject ?? input.projects[0] ?? null;
+}
+
+/** How much history attach imports. Server defaults to compaction when omitted. */
+export type ImportHistoryMode = "compaction" | "full";
+
+/** Client default until Settings / sheet control overrides it. */
+export const DEFAULT_IMPORT_HISTORY_MODE: ImportHistoryMode = "compaction";
+
+/**
+ * Reason a listed row cannot be attached, or null when the row is importable.
+ */
+export function importThreadRowBlockedReason(entry: AgentSessionEntry): string | null {
+  if (entry.importable) return null;
+  const reason = entry.importBlockedReason?.trim();
+  return reason && reason.length > 0 ? reason : "This session cannot be imported.";
+}
+
+/** True when the row should render disabled / non-clickable. */
+export function isImportThreadRowDisabled(entry: AgentSessionEntry): boolean {
+  return importThreadRowBlockedReason(entry) !== null;
+}
+
+/**
+ * Independent context chips for the import row: max, used, and native percent
+ * each format on their own when present (no derived percent from used/max).
+ */
+export function formatImportThreadContextParts(
+  entry: Pick<AgentSessionEntry, "contextMaxTokens" | "contextUsedTokens" | "contextUsagePercent">,
+): {
+  readonly maxLabel: string | null;
+  readonly usedLabel: string | null;
+  readonly percentLabel: string | null;
+} {
+  const maxLabel =
+    entry.contextMaxTokens !== undefined
+      ? `${formatContextWindowTokens(entry.contextMaxTokens)} max`
+      : null;
+  const usedLabel =
+    entry.contextUsedTokens !== undefined
+      ? `${formatContextWindowTokens(entry.contextUsedTokens)} used`
+      : null;
+  const percentLabel =
+    entry.contextUsagePercent !== undefined ? `${Math.round(entry.contextUsagePercent)}%` : null;
+  return { maxLabel, usedLabel, percentLabel };
+}
+
+/** Short relative labels for created and last-message times. */
+export function formatImportThreadTimeParts(
+  entry: Pick<AgentSessionEntry, "createdAt" | "lastMessageAt">,
+): {
+  readonly createdLabel: string | null;
+  readonly lastMessageLabel: string | null;
+} {
+  const createdLabel = formatRelativeTimeLabel(entry.createdAt);
+  const lastMessageLabel = formatRelativeTimeLabel(entry.lastMessageAt);
+  return {
+    createdLabel: createdLabel && createdLabel.length > 0 ? createdLabel : null,
+    lastMessageLabel: lastMessageLabel && lastMessageLabel.length > 0 ? lastMessageLabel : null,
+  };
 }

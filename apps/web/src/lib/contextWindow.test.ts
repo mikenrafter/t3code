@@ -83,4 +83,33 @@ describe("contextWindow", () => {
     expect(snapshot?.usedTokens).toBe(81_659);
     expect(snapshot?.totalProcessedTokens).toBe(748_126);
   });
+
+  it("accepts a percent-only context-window payload without usedTokens", () => {
+    // Import may seed Cursor's native composerData.contextUsagePercent alone.
+    // The meter must show that percent; do not require inventing usedTokens.
+    const snapshot = deriveLatestContextWindowSnapshot([
+      makeActivity("activity-1", "context-window.updated", {
+        usedPercentage: 37,
+      }),
+    ]);
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.usedPercentage).toBe(37);
+    expect(snapshot?.usedTokens).toBeNull();
+    expect(snapshot?.maxTokens).toBeNull();
+  });
+
+  it("does not invent usedPercentage when only usedTokens+maxTokens are seeded", () => {
+    // Client derives % from used/max; import must not also stuff a derived percent.
+    const snapshot = deriveLatestContextWindowSnapshot([
+      makeActivity("activity-1", "context-window.updated", {
+        usedTokens: 14_000,
+        maxTokens: 200_000,
+      }),
+    ]);
+
+    expect(snapshot?.usedTokens).toBe(14_000);
+    expect(snapshot?.maxTokens).toBe(200_000);
+    expect(snapshot?.usedPercentage).toBeCloseTo(7, 5);
+  });
 });
