@@ -35,6 +35,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -168,6 +169,33 @@ export interface AgentSessionThread {
   readonly messages: ReadonlyArray<AgentSessionThreadMessage>;
 }
 
+/**
+ * What the session list needs to render a row: who owns the session, what the
+ * user asked first, and when it last ran. Deliberately cheaper than
+ * {@link AgentSessionThread}, which carries the imported message history.
+ */
+export interface AgentSessionDescriptor {
+  readonly source: AgentSessionSource;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerSessionId: string;
+  readonly title: string;
+  readonly promptPreview: string;
+  readonly lastActiveAt: string;
+  readonly cwd: string;
+}
+
+/** One provider home that could not be read, so the rest of the list still shows. */
+export interface AgentSessionDescriptorFailure {
+  readonly source: AgentSessionSource;
+  readonly message: string;
+}
+
+export interface AgentSessionDescriptorPage {
+  readonly descriptors: ReadonlyArray<AgentSessionDescriptor>;
+  readonly providerErrors: ReadonlyArray<AgentSessionDescriptorFailure>;
+  readonly truncated: boolean;
+}
+
 export type AgentSessionRecentThread =
   | {
       readonly _tag: "Importable";
@@ -193,6 +221,15 @@ export class AgentSessionScanner extends Context.Service<
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
+    /**
+     * Newest-first descriptors for sessions that ran in `workspaceRoot`, read
+     * without parsing whole transcripts. A home that cannot be read reports a
+     * provider error instead of failing the page.
+     */
+    readonly listRecentSessionDescriptors: (
+      workspaceRoot: string,
+      limit: number,
+    ) => Effect.Effect<AgentSessionDescriptorPage, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
 
@@ -511,6 +548,60 @@ function extractDecodedCwd(record: DecodedTranscriptRecord): string | null {
   return cwd && cwd.length > 0 ? cwd : null;
 }
 
+/** Session id / first prompt / title from one JSONL record, for cheap list rows. */
+function extractDescriptorFields(
+  source: AgentSessionSource,
+  line: string,
+): {
+  readonly cwd: string | null;
+  readonly sessionId: string | null;
+  readonly prompt: string | null;
+  readonly title: string | null;
+} {
+  const empty = { cwd: null, sessionId: null, prompt: null, title: null } as const;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return empty;
+  }
+  if (typeof parsed !== "object" || parsed === null) return empty;
+  const record = parsed as DecodedTranscriptRecord;
+  const cwd = extractDecodedCwd(record);
+  if (source === "claudeAgent") {
+    const sessionId = record.sessionId?.trim() || null;
+    const title = record.aiTitle?.trim() || null;
+    let prompt: string | null = null;
+    if (
+      record.type === "user" &&
+      record.isSidechain !== true &&
+      record.isMeta !== true &&
+      record.isCompactSummary !== true
+    ) {
+      const text = extractText(record.message?.content);
+      if (text.length > 0) prompt = text;
+    }
+    return { cwd, sessionId, prompt, title };
+  }
+  let sessionId: string | null = null;
+  if (record.type === "session_meta") {
+    sessionId = record.payload?.id?.trim() || record.payload?.session_id?.trim() || null;
+  }
+  let prompt: string | null = null;
+  if (record.type === "event_msg" && record.payload?.type === "user_message") {
+    const text = record.payload.message?.trim() ?? "";
+    if (text.length > 0) prompt = text;
+  } else if (
+    record.type === "response_item" &&
+    record.payload?.type === "message" &&
+    record.payload.role === "user"
+  ) {
+    const text = extractText(record.payload.content);
+    if (text.length > 0) prompt = text;
+  }
+  return { cwd, sessionId, prompt, title: null };
+}
+
 function shouldRetainDecodedRecord(
   source: AgentSessionSource,
   record: DecodedTranscriptRecord,
@@ -810,6 +901,81 @@ export const make = Effect.gen(function* () {
   });
 
   /**
+   * Read just enough of a transcript to name the session and its first prompt.
+   * Stops early so oversized histories still appear in the session list.
+   */
+  const readDescriptorMeta = Effect.fn("AgentSessionScanner.readDescriptorMeta")(function* (
+    source: AgentSessionSource,
+    transcript: TranscriptCandidate & { readonly mtimeMs: number },
+  ) {
+    if (transcript.size === 0) return null;
+    const fallbackSessionId = path.basename(transcript.filePath, ".jsonl");
+    return yield* Effect.scoped(
+      fileSystem.open(transcript.filePath, { flag: "r" }).pipe(
+        Effect.flatMap((file) =>
+          Effect.gen(function* () {
+            const decoder = new TextDecoder();
+            let remaining = "";
+            let bytesRead = 0;
+            let recordsRead = 0;
+            let sessionId = source === "codex" ? "" : fallbackSessionId;
+            let prompt: string | null = null;
+            let title: string | null = null;
+            const maxBytes = Math.min(MAX_TRANSCRIPT_SCAN_BYTES, transcript.size);
+
+            const consider = (line: string) => {
+              const fields = extractDescriptorFields(source, line);
+              if (fields.sessionId !== null && (source !== "codex" || sessionId.length === 0)) {
+                sessionId = fields.sessionId;
+              }
+              if (fields.title !== null) title = fields.title;
+              if (fields.prompt !== null && prompt === null) prompt = fields.prompt;
+              return sessionId.length > 0 && prompt !== null;
+            };
+
+            while (bytesRead < maxBytes) {
+              if (recordsRead >= MAX_METADATA_RECORDS_PER_TRANSCRIPT) return null;
+              const readSize = Math.min(METADATA_READ_BYTES, maxBytes - bytesRead);
+              const next = yield* file.readAlloc(readSize);
+              if (Option.isNone(next)) break;
+              bytesRead += next.value.byteLength;
+              remaining += decoder.decode(next.value, { stream: true });
+              const lines = remaining.split("\n");
+              remaining = lines.pop() ?? "";
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.length === 0) continue;
+                recordsRead += 1;
+                if (consider(trimmed)) {
+                  return {
+                    providerSessionId: sessionId,
+                    promptPreview: prompt!,
+                    title: title ?? prompt!,
+                  };
+                }
+                if (recordsRead >= MAX_METADATA_RECORDS_PER_TRANSCRIPT) return null;
+              }
+            }
+
+            const last = (remaining + decoder.decode()).trim();
+            if (last.length > 0) {
+              recordsRead += 1;
+              consider(last);
+            }
+
+            if (sessionId.length === 0 || prompt === null) return null;
+            return {
+              providerSessionId: sessionId,
+              promptPreview: prompt,
+              title: title ?? prompt,
+            };
+          }),
+        ),
+      ),
+    ).pipe(Effect.orElseSucceed(() => null));
+  });
+
+  /**
    * Project history fields while reading, before allocating whole JSON records.
    * Check the file identity on both sides of the read. A selected-history budget
    * failure rejects the entire transcript before any imported messages persist.
@@ -1082,79 +1248,85 @@ export const make = Effect.gen(function* () {
     }));
   });
 
-  const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
+  const resolveSourceHomes = Effect.fn("AgentSessionScanner.resolveSourceHomes")(function* (
+    source: AgentSessionSource,
+  ) {
     const settings = yield* serverSettings.getSettings.pipe(
       Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-settings", cause })),
     );
+    const instances: Array<{
+      readonly instanceId: ProviderInstanceId;
+      readonly config: ProviderInstanceConfig;
+    }> = Object.entries(settings.providerInstances)
+      .filter(
+        ([, instance]) => instance.driver === source && resolveProviderInstanceEnabled(instance),
+      )
+      .map(([instanceId, config]) => ({
+        instanceId: ProviderInstanceId.make(instanceId),
+        config,
+      }));
+    if (!Object.hasOwn(settings.providerInstances, source)) {
+      const legacyInstance = {
+        instanceId: ProviderInstanceId.make(source),
+        config: {
+          driver: ProviderDriverKind.make(source),
+          config: settings.providers[source],
+        },
+      };
+      if (resolveProviderInstanceEnabled(legacyInstance.config)) {
+        instances.push(legacyInstance);
+      }
+    }
 
+    // A shared home contains one copy of each session. Prefer the built-in
+    // instance as its owner, then keep configured order for custom accounts.
+    instances.sort((left, right) => {
+      const leftDefault = left.instanceId === source ? 0 : 1;
+      const rightDefault = right.instanceId === source ? 0 : 1;
+      return leftDefault - rightDefault;
+    });
+    const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
+    const seenHomes = new Set<string>();
+    for (const { instanceId, config: instance } of instances) {
+      const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+      const environmentHome =
+        instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
+        hostEnvironment[homeVariable];
+
+      let homePath: string;
+      if (source === "claudeAgent") {
+        const config = decodeClaudeSettings(instance.config ?? {});
+        if (Option.isNone(config)) continue;
+        homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
+      } else {
+        const config = decodeCodexSettings(instance.config ?? {});
+        if (Option.isNone(config)) continue;
+        const codexSettings =
+          config.value.homePath.trim().length === 0 &&
+          config.value.shadowHomePath.trim().length === 0 &&
+          environmentHome?.trim()
+            ? { ...config.value, homePath: environmentHome }
+            : config.value;
+        const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
+          Effect.provideService(Path.Path, path),
+        );
+        homePath = layout.sharedHomePath;
+      }
+
+      const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
+      if (seenHomes.has(homeKey)) continue;
+      seenHomes.add(homeKey);
+      homes.push({ homePath, providerInstanceId: instanceId });
+    }
+    return homes;
+  });
+
+  const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
     const raw: Array<RawCandidate> = [];
     let truncated = false;
 
     for (const source of ["claudeAgent", "codex"] as const) {
-      const instances: Array<{
-        readonly instanceId: ProviderInstanceId;
-        readonly config: ProviderInstanceConfig;
-      }> = Object.entries(settings.providerInstances)
-        .filter(
-          ([, instance]) => instance.driver === source && resolveProviderInstanceEnabled(instance),
-        )
-        .map(([instanceId, config]) => ({
-          instanceId: ProviderInstanceId.make(instanceId),
-          config,
-        }));
-      if (!Object.hasOwn(settings.providerInstances, source)) {
-        const legacyInstance = {
-          instanceId: ProviderInstanceId.make(source),
-          config: {
-            driver: ProviderDriverKind.make(source),
-            config: settings.providers[source],
-          },
-        };
-        if (resolveProviderInstanceEnabled(legacyInstance.config)) {
-          instances.push(legacyInstance);
-        }
-      }
-
-      // A shared home contains one copy of each session. Prefer the built-in
-      // instance as its owner, then keep configured order for custom accounts.
-      instances.sort((left, right) => {
-        const leftDefault = left.instanceId === source ? 0 : 1;
-        const rightDefault = right.instanceId === source ? 0 : 1;
-        return leftDefault - rightDefault;
-      });
-      const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
-      const seenHomes = new Set<string>();
-      for (const { instanceId, config: instance } of instances) {
-        const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-        const environmentHome =
-          instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
-          hostEnvironment[homeVariable];
-
-        let homePath: string;
-        if (source === "claudeAgent") {
-          const config = decodeClaudeSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
-        } else {
-          const config = decodeCodexSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          const codexSettings =
-            config.value.homePath.trim().length === 0 &&
-            config.value.shadowHomePath.trim().length === 0 &&
-            environmentHome?.trim()
-              ? { ...config.value, homePath: environmentHome }
-              : config.value;
-          const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
-            Effect.provideService(Path.Path, path),
-          );
-          homePath = layout.sharedHomePath;
-        }
-
-        const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
-        if (seenHomes.has(homeKey)) continue;
-        seenHomes.add(homeKey);
-        homes.push({ homePath, providerInstanceId: instanceId });
-      }
+      const homes = yield* resolveSourceHomes(source);
 
       const transcriptCandidates: Array<TranscriptCandidate> = [];
       const baseOperationBudget = Math.floor(
@@ -1489,7 +1661,114 @@ export const make = Effect.gen(function* () {
     completedSources = [],
   ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
 
-  return AgentSessionScanner.of({ scan, recentThreads });
+  const listRecentSessionDescriptors: AgentSessionScanner["Service"]["listRecentSessionDescriptors"] =
+    Effect.fn("AgentSessionScanner.listRecentSessionDescriptors")(function* (
+      workspaceRoot: string,
+      limit: number,
+    ) {
+      const root = path.resolve(expandHomePath(workspaceRoot));
+      const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
+      if (isExcludedProjectPath(root) || isExcludedProjectPath(realRoot)) {
+        return { descriptors: [], providerErrors: [], truncated: false };
+      }
+      const rootIdentity = yield* directoryIdentity(root);
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+      const cutoffMs = nowMs - RECENT_THREAD_WINDOW_MS;
+
+      const providerErrors: Array<AgentSessionDescriptorFailure> = [];
+      for (const source of ["claudeAgent", "codex"] as const) {
+        const homes = yield* resolveSourceHomes(source);
+        for (const home of homes) {
+          const probeRoot =
+            source === "claudeAgent"
+              ? path.join(home.homePath, "projects")
+              : path.join(home.homePath, "sessions");
+          const probed = yield* fileSystem.readDirectory(probeRoot).pipe(
+            Effect.as(null as string | null),
+            Effect.catchTags({
+              PlatformError: (error: PlatformError.PlatformError) =>
+                error.reason._tag === "NotFound"
+                  ? Effect.succeed(null)
+                  : Effect.succeed(
+                      error.message.trim().length > 0
+                        ? error.message
+                        : `Could not read ${probeRoot}`,
+                    ),
+            }),
+          );
+          if (probed !== null) {
+            providerErrors.push({ source, message: probed });
+            break;
+          }
+        }
+      }
+
+      const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
+      cachedCandidates = candidates;
+
+      const eligibleTranscripts: Array<{
+        readonly candidate: RawCandidate;
+        readonly transcript: RawCandidate["transcripts"][number] & { readonly mtimeMs: number };
+      }> = [];
+      for (const candidate of candidates) {
+        const expanded = expandHomePath(candidate.cwd.trim());
+        if (!path.isAbsolute(expanded)) continue;
+        const resolved = path.resolve(expanded);
+        if ((yield* directoryIdentity(resolved)) !== rootIdentity) continue;
+
+        for (const transcript of candidate.transcripts) {
+          if (
+            transcript.mtimeMs === null ||
+            transcript.mtimeMs < cutoffMs ||
+            transcript.mtimeMs > nowMs
+          ) {
+            continue;
+          }
+          eligibleTranscripts.push({
+            candidate,
+            transcript: { ...transcript, mtimeMs: transcript.mtimeMs },
+          });
+        }
+      }
+
+      eligibleTranscripts.sort((left, right) => {
+        if (left.transcript.mtimeMs !== right.transcript.mtimeMs) {
+          return right.transcript.mtimeMs - left.transcript.mtimeMs;
+        }
+        return left.transcript.filePath.localeCompare(right.transcript.filePath);
+      });
+
+      const descriptors: Array<AgentSessionDescriptor> = [];
+      let truncated = false;
+      for (const { candidate, transcript } of eligibleTranscripts) {
+        if (descriptors.length >= limit) {
+          truncated = true;
+          break;
+        }
+        const stats = yield* statOption(transcript.filePath);
+        if (Option.isNone(stats) || stats.value.type !== "File") continue;
+        const meta = yield* readDescriptorMeta(candidate.source, {
+          filePath: transcript.filePath,
+          mtimeMs: transcript.mtimeMs,
+          providerInstanceId: candidate.providerInstanceId,
+          size: Number(stats.value.size),
+        });
+        if (meta === null) continue;
+        descriptors.push({
+          source: candidate.source,
+          providerInstanceId: candidate.providerInstanceId,
+          providerSessionId: meta.providerSessionId,
+          title: meta.title,
+          promptPreview: meta.promptPreview,
+          lastActiveAt: DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs)),
+          cwd: candidate.cwd,
+        });
+      }
+
+      return { descriptors, providerErrors, truncated };
+    });
+
+  return AgentSessionScanner.of({ scan, recentThreads, listRecentSessionDescriptors });
 });
 
 export const layer = Layer.effect(AgentSessionScanner, make);

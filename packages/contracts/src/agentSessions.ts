@@ -1,5 +1,12 @@
 import * as Schema from "effect/Schema";
-import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  PositiveInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 /** Coding agent home directories the scanner knows how to read. */
@@ -102,6 +109,74 @@ export const AgentSessionImportResult = Schema.Struct({
   skippedCount: NonNegativeInt,
 });
 export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
+
+/** Raised in steps as the user asks for more history. Filtering stays client-side. */
+export const AgentSessionListInput = Schema.Struct({
+  projectId: ProjectId,
+  expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  limit: Schema.optional(PositiveInt),
+});
+export type AgentSessionListInput = typeof AgentSessionListInput.Type;
+
+export const AgentSessionEntry = Schema.Struct({
+  provider: AgentSessionSource,
+  providerInstanceId: ProviderInstanceId,
+  providerSessionId: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  promptPreview: TrimmedNonEmptyString,
+  lastActiveAt: IsoDateTime,
+  cwd: TrimmedNonEmptyString,
+  alreadyImported: Schema.Boolean,
+});
+export type AgentSessionEntry = typeof AgentSessionEntry.Type;
+
+export const AgentSessionProviderError = Schema.Struct({
+  provider: AgentSessionSource,
+  message: TrimmedNonEmptyString,
+});
+export type AgentSessionProviderError = typeof AgentSessionProviderError.Type;
+
+export const AgentSessionListResult = Schema.Struct({
+  entries: Schema.Array(AgentSessionEntry),
+  providerErrors: Schema.Array(AgentSessionProviderError),
+  truncated: Schema.optional(Schema.Boolean),
+});
+export type AgentSessionListResult = typeof AgentSessionListResult.Type;
+
+export const AgentSessionAttachInput = Schema.Struct({
+  projectId: ProjectId,
+  expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  providerInstanceId: ProviderInstanceId,
+  providerSessionId: TrimmedNonEmptyString,
+});
+export type AgentSessionAttachInput = typeof AgentSessionAttachInput.Type;
+
+export const AgentSessionAttachResult = Schema.Struct({
+  threadId: ThreadId,
+  created: Schema.Boolean,
+});
+export type AgentSessionAttachResult = typeof AgentSessionAttachResult.Type;
+
+export class AgentSessionUnavailableError extends Schema.TaggedError<AgentSessionUnavailableError>()(
+  "AgentSessionUnavailableError",
+  {
+    providerInstanceId: ProviderInstanceId,
+    providerSessionId: TrimmedNonEmptyString,
+  },
+) {
+  override get message(): string {
+    return `Session '${this.providerSessionId}' is no longer available from '${this.providerInstanceId}'.`;
+  }
+}
+
+export class AgentSessionAttachDeletedThreadError extends Schema.TaggedError<AgentSessionAttachDeletedThreadError>()(
+  "AgentSessionAttachDeletedThreadError",
+  { threadId: ThreadId },
+) {
+  override get message(): string {
+    return `Imported thread '${this.threadId}' was deleted. Restore it instead of importing the session again.`;
+  }
+}
 
 export class AgentSessionScanError extends Schema.TaggedError<AgentSessionScanError>()(
   "AgentSessionScanError",

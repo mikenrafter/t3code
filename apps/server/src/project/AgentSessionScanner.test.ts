@@ -14,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -123,6 +124,14 @@ const runRecentThreads = (input: ScannerTestInput & { readonly workspaceRoot: st
       outcomes.flatMap((outcome) => (outcome._tag === "Importable" ? [outcome.thread] : [])),
     ),
   );
+
+const runRecentSessionDescriptors = (
+  input: ScannerTestInput & { readonly workspaceRoot: string; readonly limit: number },
+) =>
+  Effect.gen(function* () {
+    const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+    return yield* scanner.listRecentSessionDescriptors(input.workspaceRoot, input.limit);
+  }).pipe(Effect.provide(makeScannerTestLayer(input)));
 
 const makeTempDir = Effect.fn("AgentSessionScanner.test.makeTempDir")(function* (prefix: string) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -2608,6 +2617,224 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             outcome._tag === "Importable" ? [outcome.thread.providerSessionId] : [],
           ),
         ).toEqual(["recent-session"]);
+      }),
+    );
+  });
+
+  describe("listRecentSessionDescriptors", () => {
+    const codexRollout = (cwd: string, sessionId: string, prompt: string) =>
+      [
+        encodeTranscriptRecord({ type: "session_meta", payload: { id: sessionId, cwd } }),
+        encodeTranscriptRecord({
+          type: "event_msg",
+          payload: { type: "user_message", message: prompt },
+        }),
+      ].join("\n");
+
+    const claudeTranscript = (cwd: string, sessionId: string, prompt: string) =>
+      `${encodeTranscriptRecord({
+        type: "user",
+        cwd,
+        sessionId,
+        timestamp: "2026-08-24T10:00:00.000Z",
+        message: { role: "user", content: prompt },
+      })}\n`;
+
+    it.effect("describes this project's recent sessions newest first", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-workspace-");
+        const otherWorkspace = yield* makeTempDir("t3code-descriptor-other-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-selected", "claude-recent.jsonl"),
+          contents: claudeTranscript(workspace, "claude-recent", "Fix the flaky test"),
+          mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+        });
+        yield* writeTranscript({
+          filePath: path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-codex-recent.jsonl",
+          ),
+          contents: codexRollout(workspace, "codex-recent", "Ship the importer"),
+          mtimeMs: Date.parse("2026-08-24T10:00:00.000Z"),
+        });
+        yield* writeTranscript({
+          filePath: path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-codex-elsewhere.jsonl",
+          ),
+          contents: codexRollout(otherWorkspace, "codex-elsewhere", "Different project"),
+          mtimeMs: Date.parse("2026-08-24T11:30:00.000Z"),
+        });
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 15,
+        });
+
+        expect(page.descriptors).toEqual([
+          {
+            source: "claudeAgent",
+            providerInstanceId: "claudeAgent",
+            providerSessionId: "claude-recent",
+            title: "Fix the flaky test",
+            promptPreview: "Fix the flaky test",
+            lastActiveAt: "2026-08-24T11:00:00.000Z",
+            cwd: workspace,
+          },
+          {
+            source: "codex",
+            providerInstanceId: "codex",
+            providerSessionId: "codex-recent",
+            title: "Ship the importer",
+            promptPreview: "Ship the importer",
+            lastActiveAt: "2026-08-24T10:00:00.000Z",
+            cwd: workspace,
+          },
+        ]);
+        expect(page.providerErrors).toEqual([]);
+        expect(page.truncated).toBe(false);
+      }),
+    );
+
+    it.effect("stops at the requested limit and says the page is truncated", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-limit-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-limit-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-limit-workspace-");
+        const sessionsDir = path.join(codexHomePath, "sessions", "2026", "08", "24");
+
+        for (const index of [0, 1, 2]) {
+          yield* writeTranscript({
+            filePath: path.join(sessionsDir, `rollout-codex-${index}.jsonl`),
+            contents: codexRollout(workspace, `codex-${index}`, `Prompt ${index}`),
+            mtimeMs: nowMs - index * 60_000,
+          });
+        }
+
+        const page = yield* runRecentSessionDescriptors({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          limit: 2,
+        });
+
+        expect(page.descriptors.map((descriptor) => descriptor.providerSessionId)).toEqual([
+          "codex-0",
+          "codex-1",
+        ]);
+        expect(page.truncated).toBe(true);
+      }),
+    );
+
+    it.effect("describes a session whose full history is too large to import", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-cheap-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-cheap-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-cheap-workspace-");
+
+        // This transcript exceeds the import record budget, so `recentThreads`
+        // skips it. A row in the list must still name its first prompt.
+        yield* writeTranscript({
+          filePath: path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-records.jsonl",
+          ),
+          contents: makeRecordLimitTranscript(workspace, true),
+          mtimeMs: nowMs,
+        });
+        const input = { claudeHomePath, codexHomePath, workspaceRoot: workspace };
+
+        const outcomes = yield* runRecentThreadOutcomes(input);
+        const page = yield* runRecentSessionDescriptors({ ...input, limit: 15 });
+
+        expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Skipped"]);
+        expect(page.descriptors).toMatchObject([
+          { providerSessionId: "record-limit-session", promptPreview: "First prompt" },
+        ]);
+      }),
+    );
+
+    it.effect("reports an unreadable provider home beside the sessions that loaded", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-descriptor-partial-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-descriptor-partial-codex-");
+        const workspace = yield* makeTempDir("t3code-descriptor-partial-workspace-");
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-selected", "claude-readable.jsonl"),
+          contents: claudeTranscript(workspace, "claude-readable", "Still listed"),
+          mtimeMs: nowMs,
+        });
+        yield* writeTranscript({
+          filePath: path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-unreadable.jsonl",
+          ),
+          contents: codexRollout(workspace, "codex-unreadable", "Never read"),
+          mtimeMs: nowMs,
+        });
+        const unreadableFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          readDirectory: (directory, options) =>
+            directory.startsWith(path.join(codexHomePath, "sessions"))
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "readDirectory",
+                    pathOrDescriptor: directory,
+                  }),
+                )
+              : fileSystem.readDirectory(directory, options),
+        });
+
+        const page = yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          return yield* scanner.listRecentSessionDescriptors(workspace, 15);
+        }).pipe(
+          Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })),
+          Effect.provideService(FileSystem.FileSystem, unreadableFileSystem),
+        );
+
+        expect(page.descriptors.map((descriptor) => descriptor.providerSessionId)).toEqual([
+          "claude-readable",
+        ]);
+        expect(page.providerErrors.map((failure) => failure.source)).toEqual(["codex"]);
+        expect(page.providerErrors[0]?.message).not.toBe("");
       }),
     );
   });
