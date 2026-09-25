@@ -147,14 +147,11 @@ const runRecentSessionDescriptors = (
   input: ScannerTestInput & {
     readonly workspaceRoot: string;
     readonly limit: number;
-    readonly historyMode?: "compaction" | "full";
   },
 ) =>
   Effect.gen(function* () {
     const scanner = yield* AgentSessionScanner.AgentSessionScanner;
-    return yield* scanner.listRecentSessionDescriptors(input.workspaceRoot, input.limit, {
-      ...(input.historyMode === undefined ? {} : { historyMode: input.historyMode }),
-    });
+    return yield* scanner.listRecentSessionDescriptors(input.workspaceRoot, input.limit);
   }).pipe(Effect.provide(makeScannerTestLayer(input)));
 
 const makeTempDir = Effect.fn("AgentSessionScanner.test.makeTempDir")(function* (prefix: string) {
@@ -3470,7 +3467,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("historyMode picks pre- vs post-compaction Claude usage for list context chips", () =>
+    it.effect("lists both pre- and post-compaction Claude usage in one scan", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
@@ -3532,23 +3529,15 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
         });
 
-        const compacted = yield* runRecentSessionDescriptors({
+        const page = yield* runRecentSessionDescriptors({
           claudeHomePath,
           codexHomePath,
           workspaceRoot: workspace,
           limit: 15,
-          historyMode: "compaction",
-        });
-        const full = yield* runRecentSessionDescriptors({
-          claudeHomePath,
-          codexHomePath,
-          workspaceRoot: workspace,
-          limit: 15,
-          historyMode: "full",
         });
 
-        expect(compacted.descriptors[0]?.contextUsedTokens).toBe(1 + 5_000 + 3_000 + 50);
-        expect(full.descriptors[0]?.contextUsedTokens).toBe(1 + 80_000 + 20_000 + 100);
+        expect(page.descriptors[0]?.contextUsedTokens).toBe(1 + 5_000 + 3_000 + 50);
+        expect(page.descriptors[0]?.contextUsedTokensFull).toBe(1 + 80_000 + 20_000 + 100);
       }),
     );
 

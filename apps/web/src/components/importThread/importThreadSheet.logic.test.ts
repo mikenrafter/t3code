@@ -340,6 +340,19 @@ describe("formatImportThreadContextParts", () => {
       percentLabel: null,
     });
   });
+
+  it("picks compact vs full used tokens without requiring a refetch", () => {
+    const entry = {
+      contextUsedTokens: 8_000,
+      contextUsedTokensFull: 100_000,
+    };
+    expect(formatImportThreadContextParts(entry, "compaction").usedLabel).toEqual(
+      expect.stringMatching(/8/),
+    );
+    expect(formatImportThreadContextParts(entry, "full").usedLabel).toEqual(
+      expect.stringMatching(/100/),
+    );
+  });
 });
 
 describe("formatImportThreadTimeParts", () => {

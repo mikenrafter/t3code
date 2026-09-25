@@ -419,7 +419,6 @@ type ProjectSessionPage = {
 const listSessionsForProject = Effect.fn("listSessionsForProject")(function* (input: {
   readonly project: ListedSessionProject;
   readonly limit: number;
-  readonly historyMode: "compaction" | "full";
   readonly scanner: AgentSessionScanner.AgentSessionScanner["Service"];
   readonly snapshots: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
   readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
@@ -435,7 +434,6 @@ const listSessionsForProject = Effect.fn("listSessionsForProject")(function* (in
   const page = yield* input.scanner.listRecentSessionDescriptors(
     input.project.workspaceRoot,
     scanLimit,
-    { historyMode: input.historyMode },
   );
 
   const entries: Array<AgentSessionListResult["entries"][number]> = [];
@@ -481,6 +479,9 @@ const listSessionsForProject = Effect.fn("listSessionsForProject")(function* (in
         : {}),
       ...(descriptor.contextUsedTokens !== undefined
         ? { contextUsedTokens: descriptor.contextUsedTokens }
+        : {}),
+      ...(descriptor.contextUsedTokensFull !== undefined
+        ? { contextUsedTokensFull: descriptor.contextUsedTokensFull }
         : {}),
       ...(descriptor.contextUsagePercent !== undefined
         ? { contextUsagePercent: descriptor.contextUsagePercent }
@@ -562,7 +563,6 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const limit = input.limit ?? DEFAULT_SESSION_LIST_LIMIT;
-  const historyMode = input.historyMode ?? "compaction";
 
   const projects: ListedSessionProject[] = [];
   if (input.projectId !== undefined) {
@@ -601,7 +601,6 @@ export const listAgentSessions = Effect.fn("listAgentSessions")(function* (
       yield* listSessionsForProject({
         project,
         limit,
-        historyMode,
         scanner,
         snapshots,
         directory,
@@ -727,9 +726,7 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
       }
 
       const historyMode = input.historyMode ?? "compaction";
-      const page = yield* scanner.listRecentSessionDescriptors(workspaceRoot, 10_000, {
-        historyMode,
-      });
+      const page = yield* scanner.listRecentSessionDescriptors(workspaceRoot, 10_000);
       const matchingDescriptor = page.descriptors.find(
         (descriptor) =>
           descriptor.providerInstanceId === input.providerInstanceId &&
@@ -774,10 +771,15 @@ export const attachAgentSession = Effect.fn("attachAgentSession")(function* (
         thread: importable.thread,
         source: importable.source,
         // Re-read from the list descriptor: recentThreads carries messages, not context meta.
+        // Seed the meter with the usage snapshot that matches the imported history mode.
         context: {
-          ...(matchingDescriptor.contextUsedTokens !== undefined
-            ? { contextUsedTokens: matchingDescriptor.contextUsedTokens }
-            : {}),
+          ...(() => {
+            const used =
+              historyMode === "full"
+                ? (matchingDescriptor.contextUsedTokensFull ?? matchingDescriptor.contextUsedTokens)
+                : matchingDescriptor.contextUsedTokens;
+            return used !== undefined ? { contextUsedTokens: used } : {};
+          })(),
           ...(matchingDescriptor.contextMaxTokens !== undefined
             ? { contextMaxTokens: matchingDescriptor.contextMaxTokens }
             : {}),

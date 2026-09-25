@@ -197,7 +197,10 @@ export interface AgentSessionDescriptor {
   /** Latest message / activity time when known. */
   readonly lastMessageAt?: string;
   readonly contextMaxTokens?: number;
+  /** Compaction-mode used tokens (post-summary when compacted). */
   readonly contextUsedTokens?: number;
+  /** Full-history used tokens (pre-summary peak when compacted). */
+  readonly contextUsedTokensFull?: number;
   /** Native provider percent only — never derived from used/max. */
   readonly contextUsagePercent?: number;
   readonly importable?: boolean;
@@ -251,7 +254,6 @@ export class AgentSessionScanner extends Context.Service<
     readonly listRecentSessionDescriptors: (
       workspaceRoot: string,
       limit: number,
-      options?: { readonly historyMode?: "compaction" | "full" },
     ) => Effect.Effect<AgentSessionDescriptorPage, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -1303,7 +1305,6 @@ export const make = Effect.gen(function* () {
   const readDescriptorMeta = Effect.fn("AgentSessionScanner.readDescriptorMeta")(function* (
     source: AgentSessionSource,
     transcript: TranscriptCandidate & { readonly mtimeMs: number },
-    historyMode: "compaction" | "full" = "compaction",
   ) {
     if (transcript.size === 0) return null;
     const fallbackSessionId = path.basename(transcript.filePath, ".jsonl");
@@ -1399,7 +1400,13 @@ export const make = Effect.gen(function* () {
             const previewSource = assistantPreview ?? prompt;
             if (previewSource === null) return null;
             const contextUsedTokens = selectContextUsedForHistoryMode({
-              historyMode,
+              historyMode: "compaction",
+              hasCompactionSummary,
+              usedBeforeCompaction,
+              usedAfterCompaction,
+            });
+            const contextUsedTokensFull = selectContextUsedForHistoryMode({
+              historyMode: "full",
               hasCompactionSummary,
               usedBeforeCompaction,
               usedAfterCompaction,
@@ -1412,6 +1419,7 @@ export const make = Effect.gen(function* () {
               lastMessageAt: lastTimestamp ?? firstTimestamp ?? fallbackTimestamp,
               hasCompactionSummary,
               ...(contextUsedTokens !== null ? { contextUsedTokens } : {}),
+              ...(contextUsedTokensFull !== null ? { contextUsedTokensFull } : {}),
               ...(contextMaxTokens !== null ? { contextMaxTokens } : {}),
             };
           }),
@@ -2382,9 +2390,7 @@ export const make = Effect.gen(function* () {
     Effect.fn("AgentSessionScanner.listRecentSessionDescriptors")(function* (
       workspaceRoot: string,
       limit: number,
-      options?: { readonly historyMode?: "compaction" | "full" },
     ) {
-      const historyMode = options?.historyMode ?? "compaction";
       const root = path.resolve(expandHomePath(workspaceRoot));
       const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
       if (isExcludedProjectPath(root) || isExcludedProjectPath(realRoot)) {
@@ -2504,16 +2510,12 @@ export const make = Effect.gen(function* () {
         const stats = yield* statOption(transcript.filePath);
         if (Option.isNone(stats) || stats.value.type !== "File") continue;
         const fileSize = Number(stats.value.size);
-        const meta = yield* readDescriptorMeta(
-          candidate.source,
-          {
-            filePath: transcript.filePath,
-            mtimeMs: transcript.mtimeMs,
-            providerInstanceId: candidate.providerInstanceId,
-            size: fileSize,
-          },
-          historyMode,
-        );
+        const meta = yield* readDescriptorMeta(candidate.source, {
+          filePath: transcript.filePath,
+          mtimeMs: transcript.mtimeMs,
+          providerInstanceId: candidate.providerInstanceId,
+          size: fileSize,
+        });
         if (meta === null) continue;
 
         const lastActiveAt = DateTime.formatIso(DateTime.makeUnsafe(transcript.mtimeMs));
@@ -2555,6 +2557,9 @@ export const make = Effect.gen(function* () {
             : {}),
           ...(meta.contextUsedTokens !== undefined
             ? { contextUsedTokens: meta.contextUsedTokens }
+            : {}),
+          ...(meta.contextUsedTokensFull !== undefined
+            ? { contextUsedTokensFull: meta.contextUsedTokensFull }
             : {}),
           ...(meta.contextMaxTokens !== undefined
             ? { contextMaxTokens: meta.contextMaxTokens }

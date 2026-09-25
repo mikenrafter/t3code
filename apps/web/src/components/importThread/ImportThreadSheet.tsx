@@ -250,12 +250,11 @@ function ImportThreadSheet({
   );
 
   const listAtom = useMemo(() => {
-    const historyMode = useCompaction ? "compaction" : "full";
     if (!listEnvironmentId) return null;
     if (automatic) {
       return agentSessionList({
         environmentId: listEnvironmentId,
-        input: { limit, historyMode },
+        input: { limit },
       });
     }
     if (!selectedProject) return null;
@@ -265,10 +264,9 @@ function ImportThreadSheet({
         projectId: selectedProject.id,
         expectedWorkspaceRoot: selectedProject.workspaceRoot,
         limit,
-        historyMode,
       },
     });
-  }, [automatic, limit, listEnvironmentId, selectedProject, useCompaction]);
+  }, [automatic, limit, listEnvironmentId, selectedProject]);
 
   const listQuery = useEnvironmentQuery(listAtom);
   const attachSession = useAtomCommand(agentSessionAttach, { reportFailure: false });
@@ -366,14 +364,14 @@ function ImportThreadSheet({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogPopup className="max-w-xl sm:max-w-xl" showCloseButton>
+      <DialogPopup className="max-w-xl overflow-x-hidden sm:max-w-xl" showCloseButton>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <InboxIcon className="size-5 text-muted-foreground" />
             Import thread
           </DialogTitle>
         </DialogHeader>
-        <DialogPanel className="flex flex-col gap-3">
+        <DialogPanel className="flex min-w-0 flex-col gap-3 overflow-x-hidden">
           <div className="flex flex-col gap-1.5">
             <label
               className="text-xs font-medium text-muted-foreground"
@@ -569,7 +567,11 @@ function ImportThreadSheet({
               {importThreadEmptyStateMessage(emptyState)}
             </p>
           ) : (
-            <ul className="flex flex-col gap-0.5" role="listbox" aria-label="Importable sessions">
+            <ul
+              className="flex min-w-0 flex-col gap-0.5"
+              role="listbox"
+              aria-label="Importable sessions"
+            >
               {filteredEntries.map((entry) => {
                 const rowKey = `${entry.providerInstanceId}:${entry.providerSessionId}`;
                 const driver = getDriverOption(ProviderDriverKind.make(entry.provider));
@@ -581,7 +583,10 @@ function ImportThreadSheet({
                 // Recompute relative labels once a minute via nowMinute.
                 void nowMinute;
                 const timeParts = formatImportThreadTimeParts(entry);
-                const contextParts = formatImportThreadContextParts(entry);
+                const contextParts = formatImportThreadContextParts(
+                  entry,
+                  useCompaction ? "compaction" : "full",
+                );
                 const entryProject = projectById.get(entry.projectId);
                 const metaParts = [
                   entry.projectTitle,
@@ -593,14 +598,14 @@ function ImportThreadSheet({
                   contextParts.percentLabel,
                 ].filter((part): part is string => part !== null);
                 return (
-                  <li key={rowKey}>
+                  <li key={rowKey} className="min-w-0">
                     <button
                       type="button"
                       role="option"
                       disabled={rowDisabled}
                       aria-label={`${providerLabel(entry.provider)} ${entry.title}`}
                       className={cn(
-                        "flex w-full items-start gap-3 rounded-lg px-2 py-2 text-left transition-colors",
+                        "flex w-full min-w-0 items-start gap-3 overflow-hidden rounded-lg px-2 py-2 text-left transition-colors",
                         "hover:bg-accent focus-visible:bg-accent focus-visible:outline-none",
                         "disabled:opacity-64",
                       )}
@@ -609,11 +614,11 @@ function ImportThreadSheet({
                       <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
                         {Icon ? <Icon className="size-4" /> : null}
                       </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="truncate text-sm font-medium text-foreground">
+                      <span className="min-w-0 flex-1 overflow-hidden">
+                        <span className="block truncate text-sm font-medium text-foreground">
                           {entry.title}
                         </span>
-                        <span className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                        <span className="mt-0.5 line-clamp-2 break-words text-xs text-muted-foreground">
                           {entry.promptPreview}
                         </span>
                         {blockedReason ? (
@@ -622,7 +627,7 @@ function ImportThreadSheet({
                           </span>
                         ) : null}
                         {metaParts.length > 0 ? (
-                          <span className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground/80">
+                          <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground/80">
                             {entryProject ? (
                               <ProjectFavicon project={entryProject} className="size-3 shrink-0" />
                             ) : null}

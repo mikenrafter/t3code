@@ -122,11 +122,6 @@ export const AgentSessionListInput = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   limit: Schema.optional(PositiveInt),
-  /**
-   * Affects list polish for compacted sessions (e.g. which usage snapshot to
-   * show). Attach uses the same value when importing history.
-   */
-  historyMode: Schema.optional(AgentSessionHistoryMode),
 });
 export type AgentSessionListInput = typeof AgentSessionListInput.Type;
 
@@ -154,8 +149,18 @@ export const AgentSessionEntry = Schema.Struct({
   alreadyImported: Schema.Boolean,
   /** Max context window size when the provider reports it. */
   contextMaxTokens: Schema.optional(NonNegativeInt),
-  /** Last known used tokens when the provider reports it. */
+  /**
+   * Used tokens for compacted-history view (post-summary when a compact summary
+   * exists; otherwise the latest usage). Prefer this when "Use compacted chats"
+   * is on.
+   */
   contextUsedTokens: Schema.optional(NonNegativeInt),
+  /**
+   * Used tokens for full-history view (pre-summary peak when a compact summary
+   * exists; otherwise same as `contextUsedTokens`). Listed beside the compact
+   * value so the client can toggle without re-scanning.
+   */
+  contextUsedTokensFull: Schema.optional(NonNegativeInt),
   /**
    * Native context usage percent from the provider (e.g. Cursor
    * `composerData.contextUsagePercent`). Present alone without used/max is valid;
