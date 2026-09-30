@@ -370,10 +370,21 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["queue steer running turn send default behavior composer"],
   },
   {
-    id: "provider-update-checks",
-    title: "Provider update checks",
+    id: "model-update-checks",
+    title: "Check for updated models",
     to: "/settings/general",
-    searchTerms: ["installed cli versions newer available codex claude cursor grok opencode"],
+    searchTerms: [
+      "model catalog manifest newer available claude opus sonnet codex gpt fetch remote",
+    ],
+    scope: "environment-defaults",
+  },
+  {
+    id: "provider-update-checks",
+    title: "Check for updated harnesses",
+    to: "/settings/general",
+    searchTerms: [
+      "harness installed cli versions newer available codex claude cursor grok opencode provider",
+    ],
     scope: "environment-defaults",
   },
   {

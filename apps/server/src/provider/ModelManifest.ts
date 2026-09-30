@@ -380,14 +380,14 @@ export const make = Effect.gen(function* () {
     if (isWithin(fetchedAtMs, MANIFEST_TTL_MS)) return manifest;
     if (isWithin(lastAttemptMs, MANIFEST_RETRY_MS)) return manifest;
 
-    // The same switch that gates provider CLI update checks. It stops network
-    // fetches only: a manifest already cached on disk from an earlier fetch
-    // stays in effect, since the setting is about phoning home, not about
-    // discarding data the server already holds.
+    // Model-catalog fetches are gated separately from harness (provider CLI)
+    // update checks. This stops network fetches only: a manifest already
+    // cached on disk from an earlier fetch stays in effect, since the setting
+    // is about phoning home, not about discarding data the server already holds.
     const settings = yield* settingsService.getSettings.pipe(
       Effect.catchCause(() => Effect.succeed(null)),
     );
-    if (settings !== null && !settings.enableProviderUpdateChecks) return manifest;
+    if (settings !== null && !settings.enableModelUpdateChecks) return manifest;
 
     lastAttemptMs = now;
     const fetched = yield* httpClient.get(MODEL_MANIFEST_URL).pipe(

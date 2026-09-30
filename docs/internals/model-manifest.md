@@ -2,7 +2,9 @@
 
 The [bundled manifest](../../apps/server/src/provider/model-manifest.json) allows
 offline startup; fetching it from `main` lets model metadata change between
-releases. Failed fetches or invalid data preserve the last usable manifest.
+releases when `enableModelUpdateChecks` is on. That setting is independent of
+`enableProviderUpdateChecks`, which only gates harness (provider CLI) version
+probes. Failed fetches or invalid data preserve the last usable manifest.
 Remote data must pass both catalog-reference validation and the owning provider's
 adapter validation before replacing the cache.
 
