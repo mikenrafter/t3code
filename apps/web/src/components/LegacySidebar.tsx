@@ -6,6 +6,7 @@ import {
   ArrowUpDownIcon,
   ChevronRightIcon,
   FolderPlusIcon,
+  InboxIcon,
   Globe2Icon,
   SearchIcon,
   SquarePenIcon,
@@ -199,6 +200,7 @@ import {
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { openImportThreadSheet } from "./importThread/ImportThreadSheet";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -3048,6 +3050,24 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               </TooltipTrigger>
               <TooltipPopup side="right">Add project</TooltipPopup>
             </Tooltip>
+            {projectsLength > 0 ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      size="icon-xs"
+                      variant="ghost-muted"
+                      aria-label="Import thread"
+                      data-testid="sidebar-import-thread-trigger"
+                      onClick={() => openImportThreadSheet()}
+                    />
+                  }
+                >
+                  <InboxIcon className="size-3.5" />
+                </TooltipTrigger>
+                <TooltipPopup side="right">Import thread</TooltipPopup>
+              </Tooltip>
+            ) : null}
           </div>
         </div>
 

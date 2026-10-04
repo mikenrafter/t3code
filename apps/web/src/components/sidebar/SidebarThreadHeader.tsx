@@ -2,7 +2,7 @@
  * The sidebar header: one row holding search, project scope and new thread.
  *
  * Search owns the row's text and spans it. Project scope collapses to an icon
- * that sits with new-project and new-thread as a segmented group at the end.
+ * that sits with new-project, import-thread and new-thread as a segmented group at the end.
  * The scope icon swaps to the project favicon while a project is selected,
  * so the header still names the scope after the row that showed it is gone.
  *
@@ -10,7 +10,7 @@
  * of the sidebar's scope logic. `searchFieldRef` lands on the search field so
  * the picker's popup can anchor to that width rather than to its 28px trigger.
  */
-import { FolderPlusIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
+import { FolderPlusIcon, InboxIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
 import {
   type ComponentProps,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -32,6 +32,8 @@ export interface SidebarThreadHeaderProps {
   /** The project scope combobox, rendered as the first icon of the group. */
   projectScope: ReactNode;
   onNewProject: () => void;
+  /** Opens the Import thread sheet for a session started outside T3 Code. */
+  onImportThread: () => void;
   /** Receives the click so Shift+click can skip the project picker. */
   onNewThread: (event: ReactMouseEvent) => void;
   newThreadDisabled: boolean;
@@ -54,6 +56,7 @@ export function SidebarThreadHeader({
   hasProjects,
   projectScope,
   onNewProject,
+  onImportThread,
   onNewThread,
   newThreadDisabled,
   newThreadShortcutLabel,
@@ -129,6 +132,9 @@ export function SidebarThreadHeader({
             {projectScope}
             <SidebarHeaderIconButton label="Add project" onClick={onNewProject}>
               <FolderPlusIcon />
+            </SidebarHeaderIconButton>
+            <SidebarHeaderIconButton label="Import thread" onClick={onImportThread}>
+              <InboxIcon />
             </SidebarHeaderIconButton>
           </>
         ) : null}

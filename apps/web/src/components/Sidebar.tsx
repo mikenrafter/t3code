@@ -268,6 +268,7 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { openImportThreadSheet } from "./importThread/ImportThreadSheet";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -2624,6 +2625,18 @@ export default function Sidebar() {
         : (projectGroups.find((project) => project.projectKey === projectScopeKey) ?? null),
     [projectGroups, projectScopeKey],
   );
+  // Seeds the Import thread sheet with the sidebar's project scope; unscoped opens Automatic.
+  const openImportThread = useCallback(() => {
+    const preferredMember =
+      scopedProjectGroup?.memberProjects.find(
+        (member) => member.environmentId === primaryEnvironmentId,
+      ) ?? scopedProjectGroup?.memberProjects[0];
+    openImportThreadSheet(
+      preferredMember
+        ? { environmentId: preferredMember.environmentId, projectId: preferredMember.id }
+        : {},
+    );
+  }, [primaryEnvironmentId, scopedProjectGroup]);
   const scopedProjectKeys = useMemo(
     () =>
       scopedProjectGroup === null
@@ -5007,6 +5020,7 @@ export default function Sidebar() {
                 </Combobox>
               }
               onNewProject={openAddProjectCommandPalette}
+              onImportThread={openImportThread}
               onNewThread={handleNewThreadClick}
               newThreadDisabled={projects.length === 0}
               newThreadShortcutLabel={newThreadShortcutLabel}

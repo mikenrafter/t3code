@@ -43,6 +43,16 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+### Import a session
+
+To continue a session you started in Claude Code, Codex, or Cursor, choose **Import thread**
+from the sidebar header or the command palette. Pick a project, or leave it on Automatic to
+list recent sessions across all of them, then choose a session. Each session imports once.
+**Use compacted chats** keeps the first message, the compaction summary, and what came after;
+turn it off to import the full history. For Cursor sessions the context meter shows a percentage
+only. Setup still offers a bulk import of Claude Code and Codex projects; see the
+[welcome wizard](./welcome-wizard.md#import-your-projects).
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

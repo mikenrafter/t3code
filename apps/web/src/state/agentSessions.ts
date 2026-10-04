@@ -23,3 +23,18 @@ export const agentSessionImport = createEnvironmentRpcCommand(connectionAtomRunt
   label: "environment-data:agent-sessions:import",
   tag: WS_METHODS.agentSessionsImport,
 });
+
+/** Recent Claude / Codex sessions for a project, raised in page-limit steps. */
+export const agentSessionList = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+  label: "environment-data:agent-sessions:list",
+  tag: WS_METHODS.agentSessionsList,
+  // Server also caches descriptor polish on disk; keep the client warm across
+  // dialog closes without forcing a full rescan on every open.
+  staleTimeMs: 5 * 60_000,
+  idleTtlMs: 30 * 60_000,
+});
+
+export const agentSessionAttach = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:agent-sessions:attach",
+  tag: WS_METHODS.agentSessionsAttach,
+});
