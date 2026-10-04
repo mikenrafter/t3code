@@ -48,6 +48,22 @@ describe("ServerSettings response streaming", () => {
   });
 });
 
+describe("ServerSettings model update checks", () => {
+  it("defaults to enabled and is independent of harness update checks", () => {
+    const settings = decodeServerSettings({ enableProviderUpdateChecks: false });
+    expect(settings.enableModelUpdateChecks).toBe(true);
+    expect(settings.enableProviderUpdateChecks).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.enableModelUpdateChecks).toBe(true);
+  });
+
+  it("round-trips through snapshots and patches", () => {
+    const input = { enableModelUpdateChecks: false };
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+    expect(decodeServerSettingsPatch({})).toEqual({});
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();

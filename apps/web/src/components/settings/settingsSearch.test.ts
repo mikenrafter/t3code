@@ -414,11 +414,13 @@ describe("settings search targets", () => {
   });
 
   it("keeps environment-wide settings out of project scopes", () => {
-    const updates = getSettingsSearchTargetScope("provider-update-checks")!;
-    expect(updates.scope).toBe("environment-defaults");
-    expect(isSettingsSearchScopeAvailable(updates.scope, "environment")).toBe(true);
-    expect(isSettingsSearchScopeAvailable(updates.scope, "all")).toBe(true);
-    expect(isSettingsSearchScopeAvailable(updates.scope, "project")).toBe(false);
+    for (const id of ["provider-update-checks", "model-update-checks"] as const) {
+      const updates = getSettingsSearchTargetScope(id)!;
+      expect(updates.scope).toBe("environment-defaults");
+      expect(isSettingsSearchScopeAvailable(updates.scope, "environment")).toBe(true);
+      expect(isSettingsSearchScopeAvailable(updates.scope, "all")).toBe(true);
+      expect(isSettingsSearchScopeAvailable(updates.scope, "project")).toBe(false);
+    }
     const streaming = getSettingsSearchTargetScope("response-streaming")!;
     expect(streaming.scope).toBe("project-defaults");
     expect(isSettingsSearchScopeAvailable(streaming.scope, "project")).toBe(true);
@@ -531,5 +533,13 @@ describe("settings sidebar scope", () => {
     expect(isSettingsOverviewVisible({ machine: "remote" })).toBe(false);
     expect(isSettingsOverviewVisible({ project: "project" })).toBe(true);
     expect(isSettingsOverviewVisible({ project: "project", checkout: "checkout" })).toBe(true);
+  });
+
+  it("indexes model catalog checks separately from harness update checks", () => {
+    const modelHits = searchSettings("updated models").map((i) => i.id);
+    expect(modelHits).toContain("model-update-checks");
+    const harnessHits = searchSettings("updated harnesses").map((i) => i.id);
+    expect(harnessHits).toContain("provider-update-checks");
+    expect(harnessHits).not.toContain("model-update-checks");
   });
 });
