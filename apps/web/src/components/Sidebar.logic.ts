@@ -1,4 +1,10 @@
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import {
+  isExternalThreadStatusActive,
+  resolveExternalStatusOverlay,
+  resolveExternalStatusTone,
+  type ExternalStatusTone,
+} from "@t3tools/client-runtime/state/thread-external-status";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -8,7 +14,12 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type {
+  ContextMenuItem,
+  EnvironmentId,
+  ExternalThreadStatus,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
@@ -618,6 +629,7 @@ export function buildBulkUnpinContextMenuItem(input: {
 }
 
 export interface ThreadStatusPill {
+  /** Native labels, or the text of an external status overlay. */
   label:
     | "Working"
     | "Connecting"
@@ -625,13 +637,14 @@ export interface ThreadStatusPill {
     | "Pending Approval"
     | "Awaiting Input"
     | "Waiting"
-    | "Plan Ready";
+    | "Plan Ready"
+    | (string & {});
   colorClass: string;
   dotClass: string;
   pulse: boolean;
 }
 
-const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
+const THREAD_STATUS_PRIORITY: Record<string, number> = {
   "Pending Approval": 5,
   "Awaiting Input": 4,
   Working: 3,
@@ -640,6 +653,10 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Plan Ready": 2,
   Completed: 1,
 };
+/** An overlay rolls up like Working; unknown labels (overlay text) never index undefined. */
+const EXTERNAL_STATUS_PRIORITY = THREAD_STATUS_PRIORITY.Working!;
+const threadStatusPriority = (label: string) =>
+  THREAD_STATUS_PRIORITY[label] ?? EXTERNAL_STATUS_PRIORITY;
 
 type ThreadStatusInput = Pick<
   SidebarThreadSummary,
@@ -650,6 +667,7 @@ type ThreadStatusInput = Pick<
   | "latestRun"
   | "runtime"
 > & {
+  externalStatus?: SidebarThreadSummary["externalStatus"] | undefined;
   lastVisitedAt?: string | null | undefined;
   pendingBackgroundTasks?: SidebarThreadSummary["pendingBackgroundTasks"] | undefined;
 };
@@ -996,6 +1014,20 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   return "ready";
 }
 
+export { isExternalThreadStatusActive };
+
+/**
+ * The external overlay a V2 row renders in place of its native top status, or
+ * null. Native approval, input, failed, and limited states win over it.
+ */
+export function resolveSidebarV2ExternalStatus(input: {
+  readonly status: SidebarThreadStatus;
+  readonly externalStatus: ExternalThreadStatus | null | undefined;
+  readonly now?: number;
+}): ExternalThreadStatus | null {
+  return resolveExternalStatusOverlay(input);
+}
+
 export type SidebarV2TopStatusKind =
   | "approval"
   | "done"
@@ -1155,6 +1187,39 @@ export function formatWorkingDurationLabel(elapsedMs: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+const EXTERNAL_STATUS_PILL_CLASSES: Record<
+  ExternalStatusTone,
+  Pick<ThreadStatusPill, "colorClass" | "dotClass">
+> = {
+  amber: {
+    colorClass: "text-amber-700 dark:text-amber-300",
+    dotClass: "bg-amber-500 dark:bg-amber-300",
+  },
+  emerald: {
+    colorClass: "text-emerald-700 dark:text-emerald-300",
+    dotClass: "bg-emerald-500 dark:bg-emerald-300",
+  },
+  indigo: {
+    colorClass: "text-indigo-600 dark:text-indigo-300",
+    dotClass: "bg-indigo-500 dark:bg-indigo-300",
+  },
+  red: { colorClass: "text-red-700 dark:text-red-300", dotClass: "bg-red-500 dark:bg-red-300" },
+  sky: { colorClass: "text-sky-600 dark:text-sky-400", dotClass: "bg-sky-500 dark:bg-sky-400" },
+  violet: {
+    colorClass: "text-violet-700 dark:text-violet-300",
+    dotClass: "bg-violet-500 dark:bg-violet-300",
+  },
+  slate: {
+    colorClass: "text-slate-600 dark:text-slate-300",
+    dotClass: "bg-slate-500 dark:bg-slate-300",
+  },
+};
+
+/** Text color classes for an external status overlay label. */
+export function externalStatusTextClassName(status: Pick<ExternalThreadStatus, "color">): string {
+  return EXTERNAL_STATUS_PILL_CLASSES[resolveExternalStatusTone(status.color)].colorClass;
+}
+
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
 }): ThreadStatusPill | null {
@@ -1176,6 +1241,13 @@ export function resolveThreadStatusPill(input: {
       dotClass: "bg-indigo-500 dark:bg-indigo-300/90",
       pulse: false,
     };
+  }
+
+  // A failed run is native error state: it stays ahead of any overlay.
+  if (thread.runtime?.status !== "failed" && isExternalThreadStatusActive(thread.externalStatus)) {
+    const tone =
+      EXTERNAL_STATUS_PILL_CLASSES[resolveExternalStatusTone(thread.externalStatus.color)];
+    return { label: thread.externalStatus.text, ...tone, pulse: false };
   }
 
   if (thread.runtime?.status === "running" || thread.runtime?.status === "waiting") {
@@ -1244,7 +1316,7 @@ export function resolveProjectStatusIndicator(
     if (status === null) continue;
     if (
       highestPriorityStatus === null ||
-      THREAD_STATUS_PRIORITY[status.label] > THREAD_STATUS_PRIORITY[highestPriorityStatus.label]
+      threadStatusPriority(status.label) > threadStatusPriority(highestPriorityStatus.label)
     ) {
       highestPriorityStatus = status;
     }

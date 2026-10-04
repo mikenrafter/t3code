@@ -18,6 +18,7 @@ import type {
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
 import type { EnvironmentMachineKind } from "@t3tools/contracts";
+import { resolveExternalStatusOverlay } from "@t3tools/client-runtime/state/thread-external-status";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
@@ -51,6 +52,7 @@ import {
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { externalStatusTextClassName, useExternalStatusNow } from "./thread-external-status";
 
 /**
  * Thread List v2 renders one flat native list: rich edge-to-edge rows for
@@ -587,9 +589,18 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   // label as the web sidebar, sourced from the server-side visited watermark
   // so checking a thread on any device clears it everywhere.
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
-  const statusLabel =
-    STATUS_LABEL_BY_STATUS[status] ??
-    (isUnread ? { label: "Done", className: "text-adaptive-emerald-700-300" } : undefined);
+  // A producer's external status replaces working/waiting/ready; native
+  // approval, input, failed, and limited states stay ahead of it.
+  const externalStatusNow = useExternalStatusNow(thread.externalStatus);
+  const externalStatus = resolveExternalStatusOverlay({
+    status,
+    externalStatus: thread.externalStatus,
+    now: externalStatusNow,
+  });
+  const statusLabel = externalStatus
+    ? { label: externalStatus.text, className: externalStatusTextClassName(externalStatus) }
+    : (STATUS_LABEL_BY_STATUS[status] ??
+      (isUnread ? { label: "Done", className: "text-adaptive-emerald-700-300" } : undefined));
   // The timestamp is precomputed on the list item (same stamps the settled
   // tail sorts by) so a minute tick only re-renders rows that draw it.
   const timeLabel = props.timeLabel;
@@ -1204,17 +1215,21 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           <Text
             className={cn(
               "text-sm tabular-nums",
-              selected
-                ? selectedThreadRowColors.mutedForegroundClassName
-                : snoozedRow
-                  ? rowAppearance.mutedForegroundClassName
-                  : rowAppearance.tertiaryForegroundClassName,
+              !snoozedRow && externalStatus
+                ? externalStatusTextClassName(externalStatus)
+                : selected
+                  ? selectedThreadRowColors.mutedForegroundClassName
+                  : snoozedRow
+                    ? rowAppearance.mutedForegroundClassName
+                    : rowAppearance.tertiaryForegroundClassName,
             )}
             style={{ fontFamily: MONO_FONT }}
           >
             {snoozedRow && props.snoozeWakeLabelText !== undefined
               ? props.snoozeWakeLabelText
-              : timeLabel}
+              : !snoozedRow && externalStatus
+                ? externalStatus.text
+                : timeLabel}
           </Text>
         </View>
       </RowPressable>

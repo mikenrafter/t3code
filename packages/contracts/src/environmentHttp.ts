@@ -32,6 +32,7 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  NonNegativeInt,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -41,6 +42,7 @@ import {
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
 } from "./orchestrationV2.ts";
+import { ExternalThreadStatus } from "./threadExternalStatus.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
 import {
   PullRequestDiffInput,
@@ -109,6 +111,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_snapshot_failed",
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
+  "orchestration_thread_status_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -512,6 +515,16 @@ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
 });
 
+const EnvironmentOrchestrationThreadStatusMutation = Schema.Struct({
+  status: Schema.NullOr(ExternalThreadStatus),
+});
+
+const EnvironmentOrchestrationThreadStatusErrors = [
+  EnvironmentRequestInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+
 const EnvironmentOrchestrationThreadHistoryQuery = Schema.Struct({
   cursor: TrimmedNonEmptyString,
 });
@@ -537,6 +550,16 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
       params: EnvironmentOrchestrationThreadSnapshotParams,
       success: OrchestrationV2ThreadDetailSnapshot,
       error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // External producers (no protocol header) set or clear a thread status overlay.
+    HttpApiEndpoint.post("threadStatus", "/api/orchestration/threads/:threadId/status", {
+      headers: OptionalBearerHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      payload: EnvironmentOrchestrationThreadStatusMutation,
+      success: Schema.Struct({ sequence: NonNegativeInt }),
+      error: EnvironmentOrchestrationThreadStatusErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

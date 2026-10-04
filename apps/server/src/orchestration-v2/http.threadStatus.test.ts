@@ -89,7 +89,7 @@ const withStatusApi = <A>(
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(auth),
       Layer.provide(threadManagement),
-      Layer.provide(Layer.mock(SqlClient.SqlClient)({})),
+      Layer.provide(Layer.mock(SqlClient.SqlClient)({} as SqlClient.SqlClient)),
       Layer.provide(Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({})),
       Layer.provide(Layer.mock(ProjectStore.ProjectStoreV2)({})),
       Layer.provide(Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({})),

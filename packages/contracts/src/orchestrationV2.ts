@@ -39,6 +39,7 @@ import {
   OrchestrationGetTurnDiffResult,
 } from "./checkpointDiff.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { ExternalThreadStatus } from "./threadExternalStatus.ts";
 import {
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
@@ -368,6 +369,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   /** Pull request the user linked to this thread (#8160); optional so
       pre-linking servers still decode. */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  /** Producer-owned status overlay; absent = never set, null = cleared. */
+  externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
@@ -1720,6 +1723,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   /** Pull request the user linked to this thread (#8160). */
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  /** Producer-owned status overlay; absent = never set, null = cleared. */
+  externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
   pullRequests: Schema.optional(Schema.Array(ThreadPullRequestLink)),
   /** Pull request discovered from the thread's current branch. */
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
@@ -2609,6 +2614,8 @@ export const OrchestrationV2Command = Schema.Union([
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
     /** Link (object) or unlink (null) a pull request (#8160); absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+    /** Set (object) or clear (null) the external status overlay; absent leaves it unchanged. */
+    externalStatus: Schema.optional(Schema.NullOr(ExternalThreadStatus)),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),

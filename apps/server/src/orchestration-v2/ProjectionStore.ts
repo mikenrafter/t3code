@@ -10,6 +10,7 @@ import type {
   OrchestrationV2CheckpointScope,
   OrchestrationV2ExecutionNode,
   OrchestrationV2PlanArtifact,
+  OrchestrationV2RunStatus,
   PlanId,
   OrchestrationV2ConversationMessage,
   OrchestrationV2DomainEvent,
@@ -70,6 +71,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type * as Statement from "effect/unstable/sql/Statement";
 
+import { externalStatusClearedByRun, runTransitionClearEvent } from "./externalStatusClear.ts";
 import {
   isThreadHistoryUserTurn,
   isThreadHistoryTurnStart,
@@ -675,17 +677,21 @@ export function applyToProjection(
         thread: event.payload,
       };
     case "run.created":
-    case "run.updated":
+    case "run.updated": {
+      const previousRun = base.runs.find((run) => run.id === event.payload.id);
       return withLocalVisibleTurnItems({
         ...base,
-        runs: upsertById(
-          base.runs,
-          preserveRunRecordedFields(
-            base.runs.find((run) => run.id === event.payload.id),
-            event.payload,
-          ),
-        ),
+        // A matching native transition retires the external status overlay.
+        thread: externalStatusClearedByRun(
+          base.thread.externalStatus,
+          previousRun?.status,
+          event.payload.status,
+        )
+          ? { ...base.thread, externalStatus: null }
+          : base.thread,
+        runs: upsertById(base.runs, preserveRunRecordedFields(previousRun, event.payload)),
       });
+    }
     case "run.background-work-cancelled":
       return {
         ...base,
@@ -1358,6 +1364,9 @@ export function threadShellFromProjection(
     ...(projection.thread.linkedPullRequest === undefined
       ? {}
       : { linkedPullRequest: projection.thread.linkedPullRequest }),
+    ...(projection.thread.externalStatus === undefined
+      ? {}
+      : { externalStatus: projection.thread.externalStatus }),
     ...(projection.thread.branchPullRequest === undefined
       ? {}
       : { branchPullRequest: projection.thread.branchPullRequest }),
@@ -1594,6 +1603,9 @@ function shellFromState(input: {
     ...(input.state.thread.linkedPullRequest === undefined
       ? {}
       : { linkedPullRequest: input.state.thread.linkedPullRequest }),
+    ...(input.state.thread.externalStatus === undefined
+      ? {}
+      : { externalStatus: input.state.thread.externalStatus }),
     ...(input.state.thread.branchPullRequest === undefined
       ? {}
       : { branchPullRequest: input.state.thread.branchPullRequest }),
@@ -1749,6 +1761,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           case "run.updated": {
             const payloadJson = yield* encodeRunPayload(event.payload);
             const payload = parseEncodedPayload(payloadJson);
+            const previousRuns = yield* sql<{ readonly status: OrchestrationV2RunStatus }>`
+              SELECT status FROM orchestration_v2_projection_runs
+              WHERE run_id = ${event.payload.id}
+            `;
+            const clearEvent = runTransitionClearEvent(
+              previousRuns[0]?.status,
+              event.payload.status,
+            );
             yield* sql`
               INSERT INTO orchestration_v2_projection_runs (
                 run_id,
@@ -1789,6 +1809,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   "$.restartCancelledBackgroundWork",
                 )}
             `;
+            if (clearEvent !== null) {
+              // A matching native transition retires the external status overlay.
+              yield* sql`
+                UPDATE orchestration_v2_projection_threads
+                SET payload_json = json_set(payload_json, '$.externalStatus', json('null'))
+                WHERE thread_id = ${event.threadId}
+                  AND json_extract(payload_json, '$.externalStatus.clearsOn') = ${clearEvent}
+              `;
+            }
             break;
           }
           case "run.background-work-cancelled": {

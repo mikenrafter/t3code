@@ -140,6 +140,7 @@ import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
+import { useExternalStatusNow } from "../hooks/useExternalStatusNow";
 import { useNowMinute } from "../hooks/useNowMinute";
 import {
   useEnvironmentIdentities,
@@ -181,6 +182,7 @@ import {
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
+  externalStatusTextClassName,
   hasUnseenCompletion,
   isSidebarNestedLinkClick,
   isSidebarThreadWorking,
@@ -196,6 +198,7 @@ import {
   resolveSidebarRowAccessibility,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
+  resolveSidebarV2ExternalStatus,
   resolveThreadLastVisitedAt,
   searchSidebarThreads,
   shouldCreateNewThreadInCurrentProject,
@@ -1227,6 +1230,15 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  // Native approval, input, error, and limit states win; otherwise an active
+  // overlay stands in for the top status (the server already drops it on a
+  // matching run transition, the clock below only retires it on expiry).
+  const externalStatusNow = useExternalStatusNow(thread.externalStatus);
+  const externalStatus = resolveSidebarV2ExternalStatus({
+    status,
+    externalStatus: thread.externalStatus,
+    now: externalStatusNow,
+  });
   const isInFlight =
     status === "working" || status === "waiting" || status === "approval" || status === "input";
   // A woken thread reappears at its original position (the sort is
@@ -1255,8 +1267,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
-  const topStatus =
-    status === "working"
+  const topStatus = externalStatus
+    ? {
+        label: externalStatus.text,
+        icon: "external" as const,
+        className: externalStatusTextClassName(externalStatus),
+      }
+    : status === "working"
       ? {
           label: "Working",
           icon: "working" as const,
@@ -1835,6 +1852,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       />
                       <TooltipPopup side="top">Dismiss Woke notification</TooltipPopup>
                     </Tooltip>
+                  ) : externalStatus ? (
+                    <span
+                      role="status"
+                      className={cn(
+                        "text-xs font-medium",
+                        externalStatusTextClassName(externalStatus),
+                      )}
+                    >
+                      {externalStatus.text}
+                    </span>
                   ) : (
                     <span className="text-xs">
                       {variantAction === "unsettle"
@@ -2018,12 +2045,22 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             <CircleAlertIcon aria-hidden className="size-4 shrink-0" />
                           ) : topStatus.icon === "done" ? (
                             <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
+                          ) : topStatus.icon === "external" ? (
+                            externalStatus?.icon === "clock" ? (
+                              <ClockIcon aria-hidden className="size-4 shrink-0" />
+                            ) : externalStatus?.icon === "pause" ? (
+                              <AlarmClockOffIcon aria-hidden className="size-4 shrink-0" />
+                            ) : externalStatus?.icon === "check" ? (
+                              <CheckIcon aria-hidden className="size-4 shrink-0" />
+                            ) : (
+                              <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+                            )
                           ) : null}
                           {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make
                             screen readers announce every second. */}
                           <span role="status">{topStatus.label}</span>
-                          {status === "working" ? (
+                          {status === "working" && externalStatus === null ? (
                             <span aria-hidden>
                               <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                             </span>

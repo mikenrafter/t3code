@@ -1,10 +1,13 @@
 import {
+  AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  CommandId,
   EnvironmentHttpApi,
   ThreadId,
   TurnItemId,
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
@@ -72,6 +75,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const crypto = yield* Crypto.Crypto;
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -193,6 +197,30 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             snapshotSequence: snapshot.snapshotSequence,
             projection: snapshot.projection,
           };
+        }),
+      )
+      .handle(
+        "threadStatus",
+        Effect.fn("environment.orchestration.threadStatus")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const commandId = yield* crypto.randomUUIDv4.pipe(
+            Effect.orDie,
+            Effect.map((id) => CommandId.make(`external-status:${id}`)),
+          );
+          const result = yield* threadManagement
+            .dispatch({
+              type: "thread.metadata.update",
+              commandId,
+              threadId: args.params.threadId,
+              externalStatus: args.payload.status,
+            })
+            .pipe(
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_thread_status_failed", cause),
+              ),
+            );
+          return { sequence: result.sequence };
         }),
       )
       .handle(

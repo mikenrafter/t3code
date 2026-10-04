@@ -2784,6 +2784,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         case "thread.mark-unread":
           return { ...thread, lastVisitedAt: markUnreadVisitedAt };
         case "thread.metadata.update": {
+          const statusOnly =
+            command.externalStatus !== undefined &&
+            command.title === undefined &&
+            command.regenerateTitle === undefined &&
+            command.branch === undefined &&
+            command.worktreePath === undefined &&
+            command.limitRecovery === undefined &&
+            command.linkedPullRequest === undefined;
           const previousRecovery =
             thread.limitRecovery?.runId === command.limitRecovery?.runId &&
             thread.limitRecovery?.resetAt === command.limitRecovery?.resetAt
@@ -2821,6 +2829,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     Date.parse(thread.limitRecovery.resetAt)
                 ? { snoozedUntil: null, snoozedAt: null }
                 : {}),
+            ...(command.externalStatus === undefined
+              ? {}
+              : { externalStatus: command.externalStatus }),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
             ...(command.worktreePath === undefined ? {} : { worktreePath: command.worktreePath }),
             ...(command.linkedPullRequest === undefined
@@ -2857,7 +2868,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : command.regenerateTitle === false || command.title !== undefined
                 ? { titleRegeneration: null }
                 : {}),
-            updatedAt: now,
+            // A status overlay is presentation, not thread activity: it must
+            // not reorder the recency-sorted sidebar every time a producer ticks.
+            updatedAt: statusOnly ? thread.updatedAt : now,
           };
         }
         case "thread.pull-request.link":
