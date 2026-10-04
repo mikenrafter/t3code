@@ -25,6 +25,7 @@ import {
 import { layerFromStores as eventSinkLayer } from "./EventSink.ts";
 import { layerFromOrchestrationEventStore as eventStoreLayer } from "./EventStore.ts";
 import { layer as idAllocatorLayer } from "./IdAllocator.ts";
+import * as LegacyV1ResumeBridge from "./legacy/LegacyV1ResumeBridge.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import { layer as orchestratorLayer } from "./Orchestrator.ts";
 import { layer as projectionStoreLayer } from "./ProjectionStore.ts";
@@ -284,6 +285,16 @@ const effectExecutorProvided = effectExecutorLayer.pipe(
 const effectWorkerProvided = effectWorkerLayer.pipe(
   Layer.provide(Layer.merge(storesLayer, effectExecutorProvided)),
 );
+const legacyV1ResumeBridgeProvided = LegacyV1ResumeBridge.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      orchestratorProvided,
+      legacyV1ThreadImporterProvided,
+      storesLayer,
+      providerAdapterRegistryProvided,
+    ),
+  ),
+);
 const providerRuntimeRecoveryProvided = providerRuntimeRecoveryLayer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -305,6 +316,7 @@ export const OrchestrationV2LayerLive = Layer.mergeAll(
   providerRuntimeRecoveryProvided,
   projectionMaintenanceProvided,
   legacyV1ThreadImporterProvided,
+  legacyV1ResumeBridgeProvided,
 );
 
 export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(

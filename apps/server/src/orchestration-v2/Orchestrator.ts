@@ -46,6 +46,7 @@ import {
   orchestrationV2RunWorkStartedAt,
   ProviderInstanceId,
   type ProviderSessionId,
+  type ProviderThreadId,
   RunId,
   ThreadLinkedPullRequest,
   ThreadId,
@@ -259,6 +260,21 @@ export interface OrchestratorV2Shape {
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
+  /**
+   * Submits the one-time continuation of a thread V1 was running when the user
+   * upgraded. Under the thread's command lock it answers an accepted receipt
+   * with `submitted`, and otherwise submits only while the thread is still
+   * exactly as the migration bound it: not archived or deleted, no V2 run, the
+   * expected provider thread active, the captured selection unchanged. A user
+   * turn that got there first wins and this reports `skipped` without writing.
+   */
+  readonly dispatchLegacyV1Continuation: (input: {
+    readonly command: Extract<OrchestrationV2ServerCommand, { readonly type: "message.dispatch" }>;
+    readonly expectedProviderThreadId: ProviderThreadId;
+  }) => Effect.Effect<
+    { readonly outcome: "submitted" | "skipped"; readonly reason?: string },
+    OrchestratorV2Error
+  >;
   readonly getTimelinePage: (
     threadId: ThreadId,
     options: ProjectionTimelinePageOptions,
@@ -9935,6 +9951,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) =>
     threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
 
+  const dispatchLegacyV1Continuation: OrchestratorV2Shape["dispatchLegacyV1Continuation"] = ({
+    command,
+    expectedProviderThreadId,
+  }) =>
+    threadDispatch.withLock(
+      command.threadId,
+      Effect.gen(function* () {
+        const skipped = (reason: string) => ({ outcome: "skipped" as const, reason });
+        // An accepted receipt answers first: the turn it started may be done and
+        // the thread no longer untouched, but the prompt went out exactly once.
+        const receipt = yield* commandReceipts
+          .getByCommandId(command.commandId)
+          .pipe(mapDispatchError(command));
+        if (Option.isSome(receipt)) {
+          return receipt.value.status === "accepted"
+            ? { outcome: "submitted" as const }
+            : skipped("previously-rejected");
+        }
+        const current = yield* projectionStore
+          .getThreadRecords(command.threadId, ["runs"])
+          .pipe(mapDispatchError(command));
+        if (current.runs.length > 0) return skipped("v2-run-exists");
+        if (current.thread.archivedAt !== null || current.thread.deletedAt !== null) {
+          return skipped("thread-retired");
+        }
+        if (current.thread.activeProviderThreadId !== expectedProviderThreadId) {
+          return skipped("binding-changed");
+        }
+        if (
+          command.modelSelection !== undefined &&
+          !modelSelectionsEqual(current.thread.modelSelection, command.modelSelection)
+        ) {
+          return skipped("selection-changed");
+        }
+        // The lock is held: the public dispatch would wait on it forever.
+        yield* dispatchWithReceiptEffect(command);
+        return { outcome: "submitted" as const };
+      }),
+    );
+
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
@@ -10131,6 +10187,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     recoverDelegatedTask,
     delegatedTaskResultPending,
     dispatch: dispatchWithReceipt,
+    dispatchLegacyV1Continuation,
     getTimelinePage: (threadId, options) =>
       projectionStore
         .getTimelinePage(threadId, options)
@@ -10251,6 +10308,14 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
     recoverDelegatedTask: () => Effect.void,
     delegatedTaskResultPending: () => Effect.succeed(false),
     dispatch: (command) =>
+      Effect.fail(
+        new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Orchestration V2 live runtime is not configured.",
+        }),
+      ),
+    dispatchLegacyV1Continuation: ({ command }) =>
       Effect.fail(
         new OrchestratorDispatchError({
           commandId: command.commandId,

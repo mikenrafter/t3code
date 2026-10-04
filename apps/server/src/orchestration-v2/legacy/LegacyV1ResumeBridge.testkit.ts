@@ -54,8 +54,9 @@ import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "../testkit/ProviderReplayHarness.ts";
 import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
 
-export const parseJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
-export const toJson = Schema.encodeSync(Schema.UnknownFromJsonString);
+/** Test rows are asserted field by field, so the parsed value is left untyped. */
+export const parseJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Any));
+export const toJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 // ---------------------------------------------------------------------------
 // V1 rows

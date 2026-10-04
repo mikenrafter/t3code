@@ -3,6 +3,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { ensureForkV1ResumeBridgeSchema } from "./ForkV1ResumeBridgeSchema.ts";
 import { runMigrations } from "./Migrations.ts";
 
 const columnNames = Effect.gen(function* () {
@@ -97,9 +98,6 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
     );
   },
 );
-
-// Loaded where it is used so this file's other tests do not depend on the module.
-const loadBridgeSchema = Effect.promise(() => import("./ForkV1ResumeBridgeSchema.ts"));
 
 const BRIDGE_COLUMNS = [
   "thread_id",
@@ -198,7 +196,6 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
         const ledger = yield* ledgerSnapshot;
         yield* insertBridgeRow("thread-bridge-1");
 
-        const { ensureForkV1ResumeBridgeSchema } = yield* loadBridgeSchema;
         yield* ensureForkV1ResumeBridgeSchema;
         yield* ensureForkV1ResumeBridgeSchema;
         assert.deepStrictEqual(yield* runMigrations(), []);

@@ -31,6 +31,7 @@ import { flushCompileCache } from "./compileCache.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as EffectWorker from "./orchestration-v2/EffectWorker.ts";
+import * as LegacyV1ResumeBridge from "./orchestration-v2/legacy/LegacyV1ResumeBridge.ts";
 import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
@@ -413,11 +414,32 @@ export function runOrderedV2StartupPhases<
   });
 }
 
+/**
+ * Starts the one-time continuation of V1 threads in the background. It waits
+ * for command readiness inside its own parked task, so neither the pass nor a
+ * provider it reaches can delay readiness, and a startup that fails before
+ * readiness never continues anything. Failures stay inside the task.
+ */
+export const startLegacyV1Continuation = <E1, E2, R1, R2>(input: {
+  readonly awaitCommandReady: Effect.Effect<void, E1, R1>;
+  readonly continuePending: Effect.Effect<unknown, E2, R2>;
+}) =>
+  input.awaitCommandReady.pipe(
+    Effect.andThen(input.continuePending),
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logWarning("V1 thread continuation did not run", { cause: Cause.pretty(cause) }),
+    ),
+    forkParked,
+  );
+
 const make = (options?: StartupOptions) =>
   Effect.gen(function* () {
     const serverConfig = yield* ServerConfig.ServerConfig;
     const keybindings = yield* Keybindings.Keybindings;
     const legacyV1ThreadImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+    const legacyV1ResumeBridge = yield* LegacyV1ResumeBridge.LegacyV1ResumeBridge;
     const providerRuntimeRecovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -569,6 +591,10 @@ const make = (options?: StartupOptions) =>
             )
           : importPendingTranscripts
       ).pipe(forkParked);
+      yield* startLegacyV1Continuation({
+        awaitCommandReady: commandGate.awaitCommandReady,
+        continuePending: legacyV1ResumeBridge.continuePending,
+      });
 
       yield* forkParked(
         Effect.gen(function* () {

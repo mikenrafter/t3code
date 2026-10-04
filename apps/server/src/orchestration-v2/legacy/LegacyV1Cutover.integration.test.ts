@@ -42,6 +42,7 @@ import { CodexProviderCapabilitiesV2 } from "../Adapters/CodexAdapterV2.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
+import * as LegacyV1ResumeBridge from "./LegacyV1ResumeBridge.ts";
 import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
 import {
   countRuns,
@@ -1122,9 +1123,6 @@ const seedV1ResumeRows = (fixturePath: string) =>
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: fixturePath }))),
   );
 
-// Loaded where it is used so the original cutover test does not depend on the module.
-const loadBridge = Effect.promise(() => import("./LegacyV1ResumeBridge.ts"));
-
 const BRIDGE_PROMPT = "Continue where you left off.";
 
 const prepareCutoverCopy = Effect.gen(function* () {
@@ -1204,7 +1202,7 @@ describe("orchestration v2 legacy v1 resume bridge cutover", () => {
               );
               assert.isNull(unbound.thread.activeProviderThreadId);
 
-              const bridge = yield* (yield* loadBridge).make;
+              const bridge = yield* LegacyV1ResumeBridge.make;
               yield* settleCompletedRuns(1, bridge.continuePending);
 
               const prompted = yield* Ref.get(capturedTurns);
@@ -1273,7 +1271,7 @@ describe("orchestration v2 legacy v1 resume bridge cutover", () => {
                 importedThreadCount: 0,
                 importedMessageCount: 0,
               });
-              const bridge = yield* (yield* loadBridge).make;
+              const bridge = yield* LegacyV1ResumeBridge.make;
               yield* bridge.continuePending;
 
               assert.equal((yield* Ref.get(capturedTurns)).length, turnsBefore);
@@ -1312,7 +1310,7 @@ describe("orchestration v2 legacy v1 resume bridge cutover", () => {
             const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
             const projections = yield* ProjectionStore.ProjectionStoreV2;
             yield* importer.reconcileShells;
-            const bridge = yield* (yield* loadBridge).make;
+            const bridge = yield* LegacyV1ResumeBridge.make;
 
             yield* bridge.continuePending;
 

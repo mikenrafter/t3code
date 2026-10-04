@@ -13,6 +13,7 @@ import * as Ref from "effect/Ref";
 
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import * as LegacyV1ResumeBridge from "./orchestration-v2/legacy/LegacyV1ResumeBridge.ts";
 import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import {
   awaitMilestone,
@@ -207,11 +208,6 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
   }),
 );
 
-// Loaded where it is used so this file's other tests do not depend on the module.
-const loadBridge = Effect.promise(
-  () => import("./orchestration-v2/legacy/LegacyV1ResumeBridge.ts"),
-);
-
 const startupError = new ServerRuntimeStartup.ServerRuntimeStartupError({
   mode: "web",
   host: "127.0.0.1",
@@ -341,7 +337,7 @@ it.live(
             Effect.andThen(importer.ensureTranscript(threadId)),
           ),
       } satisfies typeof importer;
-      const bridge = yield* (yield* loadBridge).make.pipe(
+      const bridge = yield* LegacyV1ResumeBridge.make.pipe(
         Effect.provideService(LegacyV1ThreadImporter.LegacyV1ThreadImporter, countingImporter),
       );
 

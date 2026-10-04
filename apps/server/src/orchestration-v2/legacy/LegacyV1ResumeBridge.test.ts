@@ -13,6 +13,7 @@ import * as Fiber from "effect/Fiber";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ServerSettingsService from "../../serverSettings.ts";
+import * as EffectWorker from "../EffectWorker.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as LegacyV1ResumeBridge from "./LegacyV1ResumeBridge.ts";
 import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
@@ -392,6 +393,9 @@ it.live("lets a user turn that arrives first win over the startup continuation",
   return Effect.gen(function* () {
     yield* importThreads([runningThread(threadId)]);
     const base = yield* Orchestrator.OrchestratorV2;
+    const context = yield* Effect.context<
+      Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2
+    >();
     // The user's message lands after the bridge chose the thread but before it submits.
     const racing = {
       ...base,
@@ -399,6 +403,8 @@ it.live("lets a user turn that arrives first win over the startup continuation",
         input: Parameters<typeof base.dispatchLegacyV1Continuation>[0],
       ) =>
         settleCompletedRuns(1, dispatchUserMessage(threadId, "user got there first")).pipe(
+          Effect.provideContext(context),
+          Effect.orDie,
           Effect.andThen(base.dispatchLegacyV1Continuation(input)),
         ),
     } satisfies typeof base;
