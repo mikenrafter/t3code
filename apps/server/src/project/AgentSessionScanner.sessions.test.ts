@@ -157,6 +157,7 @@ const writeCursorChatMeta = Effect.fn("AgentSessionScanner.sessions.test.writeCu
       const db = new NodeSqlite.DatabaseSync(input.storeDbPath);
       try {
         db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
         const hex = Buffer.from(JSON.stringify(input.meta), "utf8").toString("hex");
         db.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run("0", hex);
       } finally {
@@ -182,6 +183,7 @@ const writeCursorComposerPercent = Effect.fn(
       db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
       db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
         `composerData:${input.sessionId}`,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
         JSON.stringify({ contextUsagePercent: input.contextUsagePercent }),
       );
     } finally {

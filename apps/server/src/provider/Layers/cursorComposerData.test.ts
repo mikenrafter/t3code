@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - fixtures build a real sqlite state.vscdb synchronously
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";

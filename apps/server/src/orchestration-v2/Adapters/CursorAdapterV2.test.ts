@@ -355,6 +355,7 @@ describe("CursorAdapterV2", () => {
             db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
             db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
               "composerData:native-cursor-with-percent",
+              // @effect-diagnostics-next-line preferSchemaOverJson:off
               JSON.stringify({ contextUsagePercent: 61.4545 }),
             );
           } finally {
