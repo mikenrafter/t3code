@@ -223,3 +223,15 @@ Choose **Snooze → Custom…** from a thread's menu to pick a date and time in 
 local time zone, or a duration in minutes, hours, or days. Durations start when
 you confirm; one day means 24 hours. On web and desktop, you can also snooze
 several selected threads together. Choose **Wake thread** to bring a thread back early.
+
+## On a phone or narrow window
+
+At 980 px wide or less, the right panel, open files, and the terminal drawer take the
+whole area below the header instead of sharing it with the conversation. The right
+panel covers the full screen at 760 px or less. While the terminal drawer is open, the
+conversation is hidden; close the drawer to return to it.
+
+On a touch screen, swipe right in the conversation to open the thread sidebar, and swipe
+left to open the right panel. Swipe right inside the right panel to go back to the
+conversation. Swipes ignore buttons, links, and text fields. The header buttons do the same
+with a tap.

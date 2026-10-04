@@ -544,6 +544,12 @@ import {
 } from "../lib/attachmentUploadQueue";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
+import { useMobilePanelGestures } from "./mobile/useMobilePanelGestures";
+import {
+  shouldFillTerminalDrawer,
+  shouldSuppressChatColumn,
+  type TerminalDrawerLayout,
+} from "./threadTerminalDrawerLayout";
 import { previewEnvironment } from "../state/preview";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -938,6 +944,8 @@ interface PersistentThreadTerminalDrawerProps {
   threadRef: { environmentId: EnvironmentId; threadId: ThreadId };
   threadId: ThreadId;
   active: boolean;
+  /** Mobile drawers stretch to the column under the header instead of sitting on a pixel strip. */
+  fillColumn: boolean;
   launchContext: PersistentTerminalLaunchContext | null;
   focusRequestId: number;
   splitShortcutLabel: string | undefined;
@@ -952,6 +960,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   threadRef,
   threadId,
   active,
+  fillColumn,
   launchContext,
   focusRequestId,
   splitShortcutLabel,
@@ -1267,14 +1276,24 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   return (
     <div
       className={cn(
-        "grid shrink-0 overflow-clip",
-        active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
-        active &&
-          "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
-        active && visible && "[[data-panel-animations=true]_&]:starting:grid-rows-[0fr]!",
+        "overflow-clip",
+        visible && fillColumn
+          ? "flex min-h-0 w-full flex-1 flex-col"
+          : cn(
+              "grid shrink-0",
+              active ? (visible ? "grid-rows-[1fr]" : "grid-rows-[0fr]") : "hidden",
+              active &&
+                "[[data-panel-animations=true]_&]:transition-[grid-template-rows] [[data-panel-animations=true]_&]:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:ease-out",
+              active && visible && "[[data-panel-animations=true]_&]:starting:grid-rows-[0fr]!",
+            ),
       )}
     >
-      <div className="min-h-0 overflow-clip">
+      <div
+        className={cn(
+          "min-h-0 overflow-clip",
+          visible && fillColumn && "flex min-w-0 flex-1 flex-col",
+        )}
+      >
         <ThreadTerminalDrawer
           threadRef={threadRef}
           threadId={threadId}
@@ -5778,6 +5797,16 @@ export default function ChatView(props: ChatViewProps) {
     }
     useRightPanelStore.getState().toggleVisibility(activeThreadRef);
   }, [activeThreadRef, closePreviewPanel, rightPanelOpen]);
+  const openRightPanelFromGesture = useCallback(() => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().show(activeThreadRef);
+  }, [activeThreadRef]);
+  const panelGestureProps = useMobilePanelGestures({
+    enabled: shouldUsePlanSidebarSheet,
+    onShowChat: closePreviewPanel,
+    onShowRightPanel: openRightPanelFromGesture,
+    rightPanelOpen,
+  });
   const toggleThreadPanel = useCallback(() => {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().toggleThreadPanel(activeThreadRef, threadPanelPresentation);
@@ -10769,6 +10798,16 @@ export default function ChatView(props: ChatViewProps) {
       />
     </div>
   );
+  const terminalDrawerLayout: TerminalDrawerLayout = shouldUsePlanSidebarSheet
+    ? "mobile"
+    : "desktop";
+  const terminalDrawerFillsColumn = shouldFillTerminalDrawer(terminalDrawerLayout);
+  // The mobile drawer fills everything under the header, so the chat column is hidden rather than
+  // squeezed to zero height, where its bottom-anchored composer overlay paints over the header.
+  const chatColumnHiddenByTerminal = shouldSuppressChatColumn({
+    layout: terminalDrawerLayout,
+    terminalOpen: Boolean(terminalUiState.terminalOpen),
+  });
   const panelLayoutControls = (
     <div
       className={cn(
@@ -10885,7 +10924,13 @@ export default function ChatView(props: ChatViewProps) {
         </header>
 
         {/* Main content area with optional plan sidebar */}
-        <div className="relative flex min-h-0 min-w-0 flex-1">
+        <div
+          {...panelGestureProps}
+          className={cn(
+            "relative flex min-h-0 min-w-0 flex-1",
+            chatColumnHiddenByTerminal && "hidden",
+          )}
+        >
           {/* Chat column */}
           <ChatCanvas
             composerOverlayElement={isDraftHeroState ? null : composerOverlayElement}
@@ -11449,6 +11494,7 @@ export default function ChatView(props: ChatViewProps) {
             threadRef={mountedThreadRef}
             threadId={mountedThreadRef.threadId}
             active={mountedThreadKey === activeThreadKey}
+            fillColumn={terminalDrawerFillsColumn}
             launchContext={
               mountedThreadKey === activeThreadKey ? (activeTerminalLaunchContext ?? null) : null
             }
@@ -11511,6 +11557,7 @@ export default function ChatView(props: ChatViewProps) {
           animationDurationMs={panelAnimationsActive ? panelAnimationDurationMs : 0}
           open={rightPanelOpen}
           onClose={closePreviewPanel}
+          gestureProps={panelGestureProps}
         >
           <RightPanelTabs
             mode="sheet"

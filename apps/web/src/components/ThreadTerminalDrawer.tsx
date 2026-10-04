@@ -90,19 +90,13 @@ import {
   TYPOGRAPHY_ADVANCED_STORAGE_KEY,
 } from "../appearanceFonts";
 
-const MIN_DRAWER_HEIGHT = 180;
-const MAX_DRAWER_HEIGHT_RATIO = 0.75;
-
-function maxDrawerHeight(): number {
-  if (typeof window === "undefined") return DEFAULT_THREAD_TERMINAL_HEIGHT;
-  return Math.max(MIN_DRAWER_HEIGHT, Math.floor(window.innerHeight * MAX_DRAWER_HEIGHT_RATIO));
-}
-
-function clampDrawerHeight(height: number): number {
-  const safeHeight = Number.isFinite(height) ? height : DEFAULT_THREAD_TERMINAL_HEIGHT;
-  const maxHeight = maxDrawerHeight();
-  return Math.min(Math.max(Math.round(safeHeight), MIN_DRAWER_HEIGHT), maxHeight);
-}
+import { useMediaQuery } from "../hooks/useMediaQuery";
+import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
+import {
+  resolveTerminalDrawerHeight,
+  shouldFillTerminalDrawer,
+  type TerminalDrawerLayout,
+} from "./threadTerminalDrawerLayout";
 
 function writeSystemMessage(terminal: GhosttyTerminalSurface, message: string): void {
   terminal.write(`\r\n[terminal] ${message}\r\n`);
@@ -1077,6 +1071,24 @@ export default function ThreadTerminalDrawer({
   terminalLaunchLocationsById,
 }: ThreadTerminalDrawerProps) {
   const isPanel = mode === "panel";
+  const drawerLayout: TerminalDrawerLayout = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY)
+    ? "mobile"
+    : "desktop";
+  // Mobile drawers fill the column under the chat header, so they drop the pixel height and the
+  // resize handle.
+  const isMobileFullDrawer = !isPanel && shouldFillTerminalDrawer(drawerLayout);
+  const clampDrawerHeight = useCallback(
+    (requestedHeight: number) =>
+      resolveTerminalDrawerHeight({
+        requestedHeight: Number.isFinite(requestedHeight)
+          ? requestedHeight
+          : DEFAULT_THREAD_TERMINAL_HEIGHT,
+        viewportHeight:
+          typeof window === "undefined" ? DEFAULT_THREAD_TERMINAL_HEIGHT : window.innerHeight,
+        layout: drawerLayout,
+      }),
+    [drawerLayout],
+  );
   const [advancedTypography] = useLocalStorage(
     TYPOGRAPHY_ADVANCED_STORAGE_KEY,
     false,
@@ -1105,6 +1117,13 @@ export default function ThreadTerminalDrawer({
   const setDrawerHeightFromWindowResize = useEffectEvent((nextHeight: number) => {
     setDrawerHeight(nextHeight);
   });
+  const restoreControlledDrawerHeight = useEffectEvent(() => {
+    setDrawerHeight(controlledDrawerHeight);
+  });
+  // The mobile layout holds a full-viewport height; returning to desktop restores the persisted strip.
+  useEffect(() => {
+    restoreControlledDrawerHeight();
+  }, [drawerLayout]);
   const [resizeEpoch, setResizeEpoch] = useState(0);
   const drawerHeightRef = useRef(drawerHeight);
   const lastSyncedHeightRef = useRef(controlledDrawerHeight);
@@ -1295,12 +1314,18 @@ export default function ThreadTerminalDrawer({
     drawerHeightRef.current = drawerHeight;
   }, [drawerHeight]);
 
-  const syncHeight = useCallback((nextHeight: number) => {
-    const clampedHeight = clampDrawerHeight(nextHeight);
-    if (lastSyncedHeightRef.current === clampedHeight) return;
-    lastSyncedHeightRef.current = clampedHeight;
-    onHeightChangeRef.current(clampedHeight);
-  }, []);
+  const syncHeight = useCallback(
+    (nextHeight: number) => {
+      // A filling drawer has no pixel height of its own; persisting one would overwrite the
+      // desktop strip height the user set.
+      if (isMobileFullDrawer) return;
+      const clampedHeight = clampDrawerHeight(nextHeight);
+      if (lastSyncedHeightRef.current === clampedHeight) return;
+      lastSyncedHeightRef.current = clampedHeight;
+      onHeightChangeRef.current(clampedHeight);
+    },
+    [clampDrawerHeight, isMobileFullDrawer],
+  );
 
   useEffect(() => {
     lastSyncedHeightRef.current = controlledDrawerHeight;
@@ -1333,7 +1358,7 @@ export default function ThreadTerminalDrawer({
       drawerHeightRef.current = clampedHeight;
       setDrawerHeight(clampedHeight);
     },
-    [setDrawerHeight],
+    [clampDrawerHeight, setDrawerHeight],
   );
 
   const handleResizePointerEnd = useCallback(
@@ -1374,7 +1399,7 @@ export default function ThreadTerminalDrawer({
     return () => {
       window.removeEventListener("resize", onWindowResize);
     };
-  }, [syncHeight, visible]);
+  }, [clampDrawerHeight, syncHeight, visible]);
 
   useEffect(() => {
     if (!visible) {
@@ -1396,11 +1421,12 @@ export default function ThreadTerminalDrawer({
         data-terminal-owner={isPanel ? "right-panel" : "drawer"}
         className={cn(
           "relative flex min-w-0 flex-col overflow-hidden bg-background",
-          isPanel ? "h-full flex-1" : "shrink-0 border-t border-border/80",
+          isPanel ? "h-full flex-1" : "border-t border-border/80",
+          !isPanel && (isMobileFullDrawer ? "min-h-0 flex-1" : "shrink-0"),
         )}
-        style={isPanel ? undefined : { height: `${drawerHeight}px` }}
+        style={isPanel || isMobileFullDrawer ? undefined : { height: `${drawerHeight}px` }}
       >
-        {!isPanel ? (
+        {!isPanel && !isMobileFullDrawer ? (
           <div
             className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
             onPointerDown={handleResizePointerDown}
@@ -1427,11 +1453,12 @@ export default function ThreadTerminalDrawer({
       data-terminal-owner={isPanel ? "right-panel" : "drawer"}
       className={cn(
         "relative flex min-w-0 flex-col overflow-hidden bg-background",
-        isPanel ? "h-full flex-1" : "shrink-0 border-t border-border/80",
+        isPanel ? "h-full flex-1" : "border-t border-border/80",
+        !isPanel && (isMobileFullDrawer ? "min-h-0 flex-1" : "shrink-0"),
       )}
-      style={isPanel ? undefined : { height: `${drawerHeight}px` }}
+      style={isPanel || isMobileFullDrawer ? undefined : { height: `${drawerHeight}px` }}
     >
-      {!isPanel ? (
+      {!isPanel && !isMobileFullDrawer ? (
         <div
           className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
           onPointerDown={handleResizePointerDown}
