@@ -245,7 +245,14 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
-      options?: { readonly historyMode?: "compaction" | "full" },
+      options?: {
+        readonly historyMode?: "compaction" | "full";
+        /**
+         * Cursor transcripts import as history-only threads through the explicit
+         * session picker. Bulk onboarding passes `false` to keep its Claude/Codex scope.
+         */
+        readonly includeCursor?: boolean;
+      },
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
     /**
      * Newest-first descriptors for sessions that ran in `workspaceRoot`, read
@@ -2268,6 +2275,7 @@ export const make = Effect.gen(function* () {
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
     historyMode: "compaction" | "full" = "full",
+    includeCursor = true,
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -2279,9 +2287,11 @@ export const make = Effect.gen(function* () {
     const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
     cachedCandidates = candidates;
 
-    const cursorDiscovery = yield* discoverCursorSessionsForWorkspace(workspaceRoot);
+    const cursorTranscripts = includeCursor
+      ? (yield* discoverCursorSessionsForWorkspace(workspaceRoot)).transcripts
+      : [];
     const cursorByInstance = Map.groupBy(
-      cursorDiscovery.transcripts,
+      cursorTranscripts,
       (transcript) => transcript.providerInstanceId,
     );
     const cursorCandidates: Array<RawCandidate> = Array.from(
@@ -2465,7 +2475,12 @@ export const make = Effect.gen(function* () {
     options,
   ) =>
     Stream.unwrap(
-      prepareRecentThreads(workspaceRoot, completedSources, options?.historyMode ?? "full"),
+      prepareRecentThreads(
+        workspaceRoot,
+        completedSources,
+        options?.historyMode ?? "full",
+        options?.includeCursor ?? true,
+      ),
     );
 
   const listRecentSessionDescriptors: AgentSessionScanner["Service"]["listRecentSessionDescriptors"] =

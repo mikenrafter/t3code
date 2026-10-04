@@ -83,16 +83,16 @@ const runRecentThreads = (
   input: ScannerTestInput & {
     workspaceRoot: string;
     historyMode?: "compaction" | "full";
+    includeCursor?: boolean;
   },
 ) =>
   Effect.gen(function* () {
     const scanner = yield* AgentSessionScanner.AgentSessionScanner;
     const outcomes = yield* scanner
-      .recentThreads(
-        input.workspaceRoot,
-        undefined,
-        input.historyMode === undefined ? undefined : { historyMode: input.historyMode },
-      )
+      .recentThreads(input.workspaceRoot, undefined, {
+        ...(input.historyMode === undefined ? {} : { historyMode: input.historyMode }),
+        ...(input.includeCursor === undefined ? {} : { includeCursor: input.includeCursor }),
+      })
       .pipe(
         Stream.runCollect,
         Effect.map((chunk) => Array.from(chunk)),
@@ -879,6 +879,34 @@ it.layer(NodeServices.layer)("AgentSessionScanner session listing", (it) => {
           ],
         });
       }),
+    );
+
+    it.effect(
+      "leaves Cursor transcripts out when the caller opts out (onboarding bulk import)",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3-cursor-optout-claude-");
+          const codexHomePath = yield* makeTempDir("t3-cursor-optout-codex-");
+          const cursorHomePath = yield* makeTempDir("t3-cursor-optout-home-");
+          const workspace = yield* makeTempDir("t3-cursor-optout-workspace-");
+          const agentId = "55555555-5555-4555-8555-555555555555";
+          yield* writeTranscript({
+            filePath: cursorTranscriptPath(path, cursorHomePath, workspace, agentId),
+            contents: cursorTranscript("Cursor only through the picker", "History"),
+            mtimeMs: Date.parse("2026-08-24T11:00:00.000Z"),
+          });
+          const input = {
+            claudeHomePath,
+            codexHomePath,
+            cursorHomePath,
+            workspaceRoot: workspace,
+          };
+
+          expect(yield* runRecentThreads({ ...input, includeCursor: false })).toEqual([]);
+          expect(yield* runRecentThreads(input)).toHaveLength(1);
+        }),
     );
 
     it.effect("keeps the compact summary and drops earlier history in compaction mode", () =>

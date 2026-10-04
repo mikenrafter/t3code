@@ -109,7 +109,9 @@ const makeHarness = (harness: Harness) => {
       }),
     recentThreads: (workspaceRoot, _completed, options) => {
       recentThreadRequests.push({ workspaceRoot, historyMode: options?.historyMode });
-      const rootDescriptors = harness.descriptorsByRoot[workspaceRoot] ?? [];
+      const rootDescriptors = (harness.descriptorsByRoot[workspaceRoot] ?? []).filter(
+        (entry) => options?.includeCursor !== false || entry.source !== "cursor",
+      );
       return Stream.fromIterable(
         rootDescriptors.map((entry) => ({
           _tag: "Importable" as const,
@@ -756,5 +758,27 @@ it.effect("rejects an unknown project or moved directory before reading any sess
     ).toBeInstanceOf(AgentSessionImportProjectChangedError);
     expect(harness.descriptorQueries).toEqual([]);
     expect(harness.writes).toEqual([]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("bulk onboarding import keeps Cursor sessions for the explicit picker", () => {
+  const harness = makeHarness({
+    descriptorsByRoot: {
+      [alpha.workspaceRoot]: [
+        codexSession("codex-bulk", alpha.workspaceRoot),
+        cursorSession("cursor-bulk", alpha.workspaceRoot),
+      ],
+    },
+  });
+  return Effect.gen(function* () {
+    const importer = yield* AgentSessionImporter.AgentSessionImporter;
+    const result = yield* importer.importRecentAgentThreads({ projectId: alpha.id });
+
+    expect(result.importedCount).toBe(1);
+    const created = harness.writes
+      .flat()
+      .filter((event) => event.type === "thread.created")
+      .map((event) => event.payload.id);
+    expect(created).toEqual([threadIdFor(codexInstance, "codex-bulk")]);
   }).pipe(Effect.provide(harness.layer));
 });
