@@ -623,7 +623,10 @@ export function useSettingsRestore(onRestored?: () => void) {
         : []),
       ...(settings.enableProviderUpdateChecks !==
       DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
-        ? ["Provider update checks"]
+        ? ["Check for updated harnesses"]
+        : []),
+      ...(settings.enableModelUpdateChecks !== DEFAULT_UNIFIED_SETTINGS.enableModelUpdateChecks
+        ? ["Check for updated models"]
         : []),
       ...(settings.continueThreadsAfterServerUpdate !==
       DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
@@ -701,6 +704,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.responseStreamingMode,
       settings.persistComposerContextStrip,
       settings.enableProviderUpdateChecks,
+      settings.enableModelUpdateChecks,
       settings.continueThreadsAfterServerUpdate,
       settings.sidebarAutoSettleAfterDays,
       settings.sidebarAutoSettleOnMerge,
@@ -815,6 +819,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
+      enableModelUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableModelUpdateChecks,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
       backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
@@ -2873,14 +2878,44 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           serverScoped
+          settingKeys={["enableModelUpdateChecks"]}
+          {...searchableSetting("model-update-checks")}
+          description="Fetch the latest model catalog so new models appear without waiting for a T3 Code release."
+          resetAction={
+            settings.enableModelUpdateChecks !==
+            DEFAULT_UNIFIED_SETTINGS.enableModelUpdateChecks ? (
+              <SettingResetButton
+                label="check for updated models"
+                onClick={() =>
+                  updateSettings({
+                    enableModelUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableModelUpdateChecks,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ScopedSwitch
+              settingKeys={["enableModelUpdateChecks"]}
+              checked={settings.enableModelUpdateChecks}
+              onCheckedChange={(checked) =>
+                updateSettings({ enableModelUpdateChecks: Boolean(checked) })
+              }
+              aria-label="Check for updated models"
+            />
+          }
+        />
+
+        <SettingsRow
+          serverScoped
           settingKeys={["enableProviderUpdateChecks"]}
           {...searchableSetting("provider-update-checks")}
-          description="Check installed provider CLIs for newer available versions."
+          description="Check installed provider harnesses (Claude Code, Codex, and others) for newer versions."
           resetAction={
             settings.enableProviderUpdateChecks !==
             DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
               <SettingResetButton
-                label="provider update checks"
+                label="check for updated harnesses"
                 onClick={() =>
                   updateSettings({
                     enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
@@ -2896,7 +2931,7 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
               }
-              aria-label="Check provider versions"
+              aria-label="Check for updated harnesses"
             />
           }
         />

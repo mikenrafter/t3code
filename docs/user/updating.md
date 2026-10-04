@@ -88,9 +88,9 @@ the machine instead.
 
 The same page lets you refresh provider status and update supported providers.
 These controls require a connected environment and permission to operate it.
-Provider update checks and restart continuation preferences are in
-**Settings → Maintenance**. If provider update checks are disabled, enable them
-there before refreshing to find newer versions.
+Update checks for harnesses, update checks for the model catalog, and restart
+continuation preferences are in **Settings → Maintenance**. If harness update
+checks are disabled, enable them there before refreshing to find newer versions.
 
 Install App Store or Google Play releases as usual. The mobile app can also
 download updates in the background and apply them when you next leave the app.

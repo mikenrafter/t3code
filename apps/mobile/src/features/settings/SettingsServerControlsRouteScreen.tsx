@@ -417,17 +417,31 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                   ) : null}
                   <SettingsSection title="Updates">
                     <SettingsSwitchRow
-                      icon="arrow.clockwise"
-                      label="Check provider updates"
+                      icon="brain"
+                      label="Check for updated models"
                       subtitle={
                         projectSelected
                           ? "Environment-wide setting. Select All projects to change it."
-                          : "Check installed provider CLIs for newer versions."
+                          : "Fetch the latest model catalog between T3 Code releases."
                       }
-                      value={uniform("enableProviderUpdateChecks")}
-                      disabled={disabledFor("enableProviderUpdateChecks")}
-                      onValueChange={(value) => write({ enableProviderUpdateChecks: value })}
+                      value={uniform("enableModelUpdateChecks")}
+                      disabled={disabledFor("enableModelUpdateChecks")}
+                      onValueChange={(value) => write({ enableModelUpdateChecks: value })}
                     />
+                    <View className="border-t border-border-subtle">
+                      <SettingsSwitchRow
+                        icon="arrow.clockwise"
+                        label="Check for updated harnesses"
+                        subtitle={
+                          projectSelected
+                            ? "Environment-wide setting. Select All projects to change it."
+                            : "Check installed provider harnesses for newer versions."
+                        }
+                        value={uniform("enableProviderUpdateChecks")}
+                        disabled={disabledFor("enableProviderUpdateChecks")}
+                        onValueChange={(value) => write({ enableProviderUpdateChecks: value })}
+                      />
+                    </View>
                     <View className="border-t border-border-subtle">
                       <SettingsSwitchRow
                         icon="arrow.uturn.forward"
