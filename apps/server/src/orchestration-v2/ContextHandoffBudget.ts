@@ -85,8 +85,11 @@ export function contextUsageForHandoff(input: {
       ? input.previousUsage.maxTokens
       : undefined;
   const maxTokens = input.reuseTelemetry ? reportedMax : (input.knownModelWindow ?? reportedMax);
+  // A native percent describes the previous model's window, so it does not carry over.
   return {
-    usedTokens: input.previousUsage.usedTokens,
+    ...(input.previousUsage.usedTokens === undefined
+      ? {}
+      : { usedTokens: input.previousUsage.usedTokens }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
   };
 }

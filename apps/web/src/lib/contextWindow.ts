@@ -71,14 +71,22 @@ export function deriveLatestContextWindowSnapshot(
     providerUsageUpdatedAt !== undefined
   ) {
     const maxTokens = asFiniteNumber(providerUsage.maxTokens);
-    const usedTokens = providerUsage.usedTokens;
+    // Percent-only providers (Cursor) report no token counts; none are derived from the percent.
+    const usedTokens = providerUsage.usedTokens ?? null;
+    const nativePercentage = asFiniteNumber(providerUsage.usedPercentage);
     const usedPercentage =
-      maxTokens !== null && maxTokens > 0 ? Math.min(100, (usedTokens / maxTokens) * 100) : null;
+      nativePercentage ??
+      (usedTokens !== null && maxTokens !== null && maxTokens > 0
+        ? Math.min(100, (usedTokens / maxTokens) * 100)
+        : null);
     return {
       usedTokens,
       totalProcessedTokens: asFiniteNumber(providerUsage.totalProcessedTokens),
       maxTokens,
-      remainingTokens: maxTokens === null ? null : Math.max(0, Math.round(maxTokens - usedTokens)),
+      remainingTokens:
+        usedTokens === null || maxTokens === null
+          ? null
+          : Math.max(0, Math.round(maxTokens - usedTokens)),
       usedPercentage,
       remainingPercentage: usedPercentage === null ? null : Math.max(0, 100 - usedPercentage),
       inputTokens: asFiniteNumber(providerUsage.inputTokens),

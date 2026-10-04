@@ -46,6 +46,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { CursorTransportFailure } from "../../provider/acp/CursorTransportFailure.ts";
+import { readCursorComposerContextUsage } from "../../provider/Layers/cursorComposerData.ts";
 import { cursorSdkModelSelection } from "../../provider/cursorSdkModel.ts";
 import {
   discoverCursorSkills,
@@ -1975,11 +1976,25 @@ export function makeCursorAdapterV2(
               completedAt,
             }),
           });
+          // Cursor only exposes a native percent (composerData); no token counts are invented.
+          // A missing row leaves the thread's previous contextUsage untouched.
+          const nativeAgentId = input.context.input.providerThread.nativeThreadRef?.nativeId;
+          const composerUsage =
+            nativeAgentId == null
+              ? null
+              : yield* Effect.sync(() =>
+                  readCursorComposerContextUsage(nativeAgentId, {
+                    env: adapterOptions.environment,
+                  }),
+                );
           yield* emitProviderEvent({
             type: "provider_thread.updated",
             driver: CursorAgentSdk.CURSOR_PROVIDER,
             providerThread: {
               ...input.context.input.providerThread,
+              ...(composerUsage === null
+                ? {}
+                : { contextUsage: { usedPercentage: composerUsage.contextUsagePercent } }),
               providerSessionId: session.id,
               status: "active",
               firstRunOrdinal:

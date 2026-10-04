@@ -260,8 +260,15 @@ const ThreadMetadataUpdatedPayload = Schema.Struct({
 });
 export type ThreadMetadataUpdatedPayload = typeof ThreadMetadataUpdatedPayload.Type;
 
+/**
+ * Context usage reported by a provider. `usedTokens` is optional because some providers
+ * (Cursor) only expose a native percentage; never derive one field from the other.
+ */
 export const ThreadTokenUsageSnapshot = Schema.Struct({
-  usedTokens: NonNegativeInt,
+  usedTokens: Schema.optional(NonNegativeInt),
+  usedPercentage: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  ),
   totalProcessedTokens: Schema.optional(NonNegativeInt),
   maxTokens: Schema.optional(PositiveInt),
   inputTokens: Schema.optional(NonNegativeInt),

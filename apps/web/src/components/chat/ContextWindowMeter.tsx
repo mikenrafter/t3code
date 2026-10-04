@@ -27,6 +27,8 @@ export function ContextWindowMeter(props: {
 }) {
   const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
   const usedPercentage = formatPercentage(usage.usedPercentage);
+  // Percent-only providers (Cursor) report no token counts, so only the percent is shown.
+  const percentOnly = usage.usedTokens === null && usedPercentage !== null;
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
   const circumference = 2 * Math.PI * radius;
@@ -50,7 +52,7 @@ export function ContextWindowMeter(props: {
             variant="ghost-muted"
             className="size-7"
             aria-label={
-              usage.maxTokens !== null && usedPercentage
+              (usage.maxTokens !== null || percentOnly) && usedPercentage
                 ? `Context window ${usedPercentage} used`
                 : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
             }
@@ -98,7 +100,9 @@ export function ContextWindowMeter(props: {
         <div className="flex flex-col gap-2 p-(--floating-content-inset)">
           <div className="flex items-center justify-between gap-3">
             <div className="font-medium text-muted-foreground text-xs">Context Window</div>
-            {usage.maxTokens !== null && usedPercentage ? (
+            {percentOnly ? (
+              <div className="text-secondary-label text-2xs tabular-nums">{usedPercentage}</div>
+            ) : usage.maxTokens !== null && usedPercentage ? (
               <div className="text-secondary-label text-2xs tabular-nums">
                 <span>{usedPercentage}</span>
                 <span className="mx-1">·</span>
@@ -113,7 +117,7 @@ export function ContextWindowMeter(props: {
               </div>
             )}
           </div>
-          {usage.maxTokens !== null ? (
+          {usage.maxTokens !== null || percentOnly ? (
             <div
               className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60"
               role="progressbar"

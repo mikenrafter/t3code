@@ -181,11 +181,10 @@ function messageEvents(input: {
 }
 
 /** Context fields known for a listed session. Percent and tokens are never derived from each other. */
-type ImportContextSeed = {
-  readonly usedTokens?: number;
-  readonly maxTokens?: number;
-  readonly usedPercentage?: number;
-};
+type ImportContextSeed = Pick<
+  ThreadTokenUsageSnapshot,
+  "usedTokens" | "maxTokens" | "usedPercentage"
+>;
 
 /** Seed the imported provider thread's context meter with the descriptor's known fields only. */
 function contextSeedForHistoryMode(
@@ -397,7 +396,7 @@ const make = Effect.gen(function* () {
       handoffIds: [],
       forkedFrom: null,
       pendingBackgroundTasks: [],
-      ...(hasContext ? { contextUsage: input.context as ThreadTokenUsageSnapshot } : {}),
+      ...(hasContext ? { contextUsage: input.context } : {}),
       createdAt,
       updatedAt,
     };
