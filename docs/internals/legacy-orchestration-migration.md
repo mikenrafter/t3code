@@ -19,16 +19,37 @@ Transcript import reads user and assistant rows from `projection_thread_messages
 message identifiers, text, supported attachments, timestamps, role, and ordering. A message that was
 still streaming becomes an interrupted turn item.
 
-The importer does not translate provider session identity, native provider runs, checkpoints and
-diffs, activities and tool calls, approvals, or proposed plans. V2 therefore must not present those
-records as migrated history.
+The importer does not translate native provider runs, checkpoints and diffs, activities and tool
+calls, approvals, or proposed plans. V2 therefore must not present those records as migrated
+history. Provider session identity is the exception: see the next section.
 
-## First continuation
+## Resuming the native session
 
-A migrated thread has no active provider thread. Its first continuation creates a fresh provider
-session and sends a legacy handoff built only from user and assistant messages. The handoff selects
-the newest transcript suffix within a 32,000-character budget, including section labels and the
-import notice. This budget is separate from portable provider handoffs.
+This fork bridges V1 provider sessions into V2. The shell import reads the V1 resume cursor in
+`provider_session_runtime` and binds the thread to a strong provider thread for the same native
+session ([`LegacyV1ResumeCursor.ts`](../../apps/server/src/orchestration-v2/legacy/LegacyV1ResumeCursor.ts),
+[`LegacyV1ThreadImporter.ts`](../../apps/server/src/orchestration-v2/legacy/LegacyV1ThreadImporter.ts)).
+V2 adapters never read the cursor, so the binding is what makes the first turn resume the session
+instead of starting a new one. A thread with an unusable cursor stays unbound.
+
+A bound thread's first turn sends only the user's text. The 32,000-character legacy handoff is built
+only when the thread has no native resume target, from user and assistant messages (the newest
+transcript suffix, including section labels and the import notice). That budget is separate from
+portable provider handoffs. If native resume fails, V2's usual fresh-session fallback applies.
+
+A thread whose V1 session status was `running` at the upgrade is continued once, with the message
+"Continue where you left off.", when `continueThreadsAfterServerUpdate` is enabled for its project
+([`LegacyV1ResumeBridge.ts`](../../apps/server/src/orchestration-v2/legacy/LegacyV1ResumeBridge.ts)).
+The decision is recorded as `submitted` or `skipped` and never revisited, so enabling the setting
+later does not revive old work. The runtime row's `running` is not enough: V1 maps both `ready` and
+`running` sessions to it, which is why the bridge captures the session status. A thread that already
+has a V2 run, was archived or deleted, or whose instance is unavailable or disabled, or whose native session
+another thread also names, is skipped. The continuation runs after command readiness and never
+delays startup.
+
+The bridge keeps its state in `fork_v1_resume_bridge`, created by
+[`ForkV1ResumeBridgeSchema.ts`](../../apps/server/src/persistence/ForkV1ResumeBridgeSchema.ts)
+through `forkSchemaRepairs` rather than the migration ledger (see "Divergent migration ids").
 
 ## Client and server cutover
 
