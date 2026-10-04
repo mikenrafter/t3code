@@ -227,4 +227,36 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
   });
+
+  it("accepts a native usedPercentage alone without inventing usedTokens", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "thread.token-usage.updated",
+      eventId: "event-token-usage-percent",
+      provider: "cursor",
+      createdAt: "2026-02-28T00:00:05.000Z",
+      threadId: "thread-1",
+      payload: { usage: { usedPercentage: 66.2265 } },
+    });
+
+    if (parsed.type !== "thread.token-usage.updated") {
+      throw new Error("expected thread.token-usage.updated");
+    }
+    expect(parsed.payload.usage.usedPercentage).toBe(66.2265);
+    expect(parsed.payload.usage.usedTokens).toBeUndefined();
+    expect(parsed.payload.usage.maxTokens).toBeUndefined();
+  });
+
+  it("rejects a usedPercentage outside 0 to 100", () => {
+    const withPercent = (usedPercentage: number) => ({
+      type: "thread.token-usage.updated",
+      eventId: "event-token-usage-bad-percent",
+      provider: "cursor",
+      createdAt: "2026-02-28T00:00:05.000Z",
+      threadId: "thread-1",
+      payload: { usage: { usedPercentage } },
+    });
+    expect(decodeRuntimeEvent(withPercent(100)).type).toBe("thread.token-usage.updated");
+    expect(() => decodeRuntimeEvent(withPercent(100.5))).toThrow();
+    expect(() => decodeRuntimeEvent(withPercent(-1))).toThrow();
+  });
 });

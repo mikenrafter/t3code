@@ -81,3 +81,41 @@ describe("live provider-turn usage (#8144)", () => {
     expect(snapshot?.usedPercentage).toBeNull();
   });
 });
+
+describe("native percent-only context usage (Cursor)", () => {
+  const updatedAt = DateTime.makeUnsafe("2026-09-25T00:00:00.000Z");
+
+  it("shows the provider's percent without inventing token counts", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([], undefined, {
+      contextUsage: { usedPercentage: 37 },
+      updatedAt,
+    });
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot?.usedPercentage).toBe(37);
+    expect(snapshot?.remainingPercentage).toBe(63);
+    expect(snapshot?.usedTokens).toBeNull();
+    expect(snapshot?.maxTokens).toBeNull();
+    expect(snapshot?.remainingTokens).toBeNull();
+    expect(snapshot?.updatedAt).toBe("2026-09-25T00:00:00.000Z");
+  });
+
+  it("prefers the native percent over one derived from used and max tokens", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([], undefined, {
+      contextUsage: { usedTokens: 20_000, maxTokens: 200_000, usedPercentage: 12 },
+      updatedAt,
+    });
+
+    expect(snapshot?.usedTokens).toBe(20_000);
+    expect(snapshot?.usedPercentage).toBe(12);
+  });
+
+  it("still derives the percent from used and max when no native percent exists", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([], undefined, {
+      contextUsage: { usedTokens: 20_000, maxTokens: 200_000 },
+      updatedAt,
+    });
+
+    expect(snapshot?.usedPercentage).toBe(10);
+  });
+});

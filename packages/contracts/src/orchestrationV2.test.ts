@@ -994,6 +994,40 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.nativeMetadata).toBeNull();
   });
 
+  it("keeps a percent-only Cursor context usage on the provider thread without token counts", () => {
+    const providerThreadJson = {
+      id: "provider-thread-cursor",
+      driver: "cursor",
+      providerInstanceId: "cursor",
+      providerSessionId: null,
+      appThreadId: "thread-cursor",
+      ownerNodeId: null,
+      nativeThreadRef: { driver: "cursor", nativeId: "agent-1", strength: "strong" },
+      nativeConversationHeadRef: null,
+      status: "idle",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+    };
+    const fromJson = decodeOrchestrationV2ProviderThreadJson({
+      ...providerThreadJson,
+      contextUsage: { usedPercentage: 37.5 },
+    });
+    expect(fromJson.contextUsage).toEqual({ usedPercentage: 37.5 });
+    expect(fromJson.contextUsage?.usedTokens).toBeUndefined();
+    expect(fromJson.contextUsage?.maxTokens).toBeUndefined();
+
+    expect(() =>
+      decodeOrchestrationV2ProviderThreadJson({
+        ...providerThreadJson,
+        contextUsage: { usedPercentage: 140 },
+      }),
+    ).toThrow();
+  });
+
   it("decodes historical thread shell JSON without pendingBackgroundTasks as empty roster", () => {
     const shell = decodeOrchestrationV2ThreadShell({
       createdBy: "user",

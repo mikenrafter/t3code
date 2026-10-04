@@ -1,3 +1,4 @@
+import * as NodeSqlite from "node:sqlite";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import type { InteractionUpdate } from "@cursor/sdk";
@@ -336,6 +337,157 @@ describe("CursorAdapterV2", () => {
       );
       assert.equal(sentMessages[1], "/compress");
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
+  );
+
+  it.effect(
+    "reports Cursor's native composerData percent on the provider thread without token counts",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspace = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "cursor-v2-context-percent-",
+        });
+        const stateDbPath = path.join(workspace, "state.vscdb");
+        yield* Effect.sync(() => {
+          const db = new NodeSqlite.DatabaseSync(stateDbPath);
+          try {
+            db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
+            db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+              "composerData:native-cursor-with-percent",
+              JSON.stringify({ contextUsagePercent: 61.4545 }),
+            );
+          } finally {
+            db.close();
+          }
+        });
+        const instanceId = ProviderInstanceId.make("cursor");
+        const modelSelection = { instanceId, model: "composer-2.5" };
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: workspace,
+        });
+        const settings = yield* decodeCursorSettings({});
+        const serverConfig = yield* ServerConfig.ServerConfig.pipe(
+          Effect.provide(
+            ServerConfig.layerTest(workspace, { prefix: "cursor-v2-context-percent-config-" }),
+          ),
+        );
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+
+        /** One finished turn against a native agent id; returns every thread update it emitted. */
+        const finishedTurnThreadUpdates = (agentId: string) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make(`thread-${agentId}`);
+            const adapter = makeCursorAdapterV2({
+              instanceId,
+              settings,
+              environment: { HOME: workspace, CURSOR_STATE_DB: stateDbPath },
+              fileSystem,
+              path,
+              idAllocator,
+              serverConfig,
+              runner: {
+                assertComplete: Effect.void,
+                open: () =>
+                  Effect.succeed({
+                    agentId,
+                    listMessages: Effect.succeed([]),
+                    close: Effect.void,
+                    send: () =>
+                      Effect.succeed({
+                        agentId,
+                        runId: `${agentId}-run`,
+                        wait: Effect.succeed({
+                          id: `${agentId}-run`,
+                          requestId: `${agentId}-request`,
+                          status: "finished" as const,
+                          model: { id: "composer-2.5" },
+                          durationMs: 1,
+                        }),
+                        cancel: Effect.void,
+                      }),
+                  }),
+              },
+            });
+            const runtime = yield* adapter.openSession({
+              threadId,
+              providerSessionId: ProviderSessionId.make(`session-${agentId}`),
+              modelSelection,
+              runtimePolicy,
+            });
+            const providerThread = yield* runtime.ensureThread({
+              threadId,
+              modelSelection,
+              runtimePolicy,
+            });
+            const now = yield* DateTime.now;
+            yield* runtime.startTurn({
+              threadId,
+              providerThread,
+              modelSelection,
+              runtimePolicy,
+              runId: RunId.make(`run-${agentId}`),
+              runOrdinal: 1,
+              providerTurnOrdinal: 1,
+              attemptId: RunAttemptId.make(`attempt-${agentId}`),
+              rootNodeId: NodeId.make(`root-${agentId}`),
+              appThread: {
+                id: threadId,
+                projectId: ProjectId.make("cursor-context-percent-project"),
+                createdBy: "user",
+                creationSource: "web",
+                title: "Cursor context percent",
+                providerInstanceId: instanceId,
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: null,
+                activeProviderThreadId: providerThread.id,
+                lineage: {
+                  parentThreadId: null,
+                  relationshipToParent: null,
+                  rootThreadId: threadId,
+                },
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
+                archivedAt: null,
+                settledOverride: null,
+                settledAt: null,
+                lastVisitedAt: null,
+                deletedAt: null,
+              },
+              message: {
+                messageId: MessageId.make(`message-${agentId}`),
+                createdBy: "user",
+                creationSource: "web",
+                text: "hello",
+                attachments: [],
+              },
+            });
+            const events = yield* runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            );
+            return events.flatMap((event) =>
+              event.type === "provider_thread.updated" ? [event.providerThread] : [],
+            );
+          });
+
+        const withRow = yield* finishedTurnThreadUpdates("native-cursor-with-percent");
+        const usage = withRow.at(-1)?.contextUsage;
+        assert.deepStrictEqual(usage, { usedPercentage: 61.4545 });
+        assert.isUndefined(usage?.usedTokens);
+        assert.isUndefined(usage?.maxTokens);
+
+        // A session Cursor has no composerData for stays unmetered, never zero or guessed.
+        const withoutRow = yield* finishedTurnThreadUpdates("native-cursor-without-percent");
+        assert.isTrue(withoutRow.length > 0);
+        assert.isTrue(withoutRow.every((thread) => !thread.contextUsage?.usedPercentage));
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
   );
 
   it.effect("projects Cursor directory trees and lint diagnostics as file search results", () =>
