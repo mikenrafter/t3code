@@ -3,7 +3,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { runMigrations } from "../Migrations.ts";
+import { runMigrations } from "./Migrations.ts";
 
 const columnNames = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -27,7 +27,7 @@ const insertThread = Effect.gen(function* () {
 
 // Each case needs its own database: `it.layer` shares one connection per block.
 it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
-  "057_RepairAutoSettleDisabledAt on a fork database",
+  "fork schema repairs on a fork database",
   (it) => {
     it.effect(
       "adds auto_settle_disabled_at to a fork database that recorded migration 54 as another migration",
@@ -46,9 +46,10 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
 
           const executed = yield* runMigrations();
 
+          // The repair runs outside the ledger so it never claims an id upstream may assign.
           assert.deepStrictEqual(
             executed.map(([id]) => id),
-            [55, 56, 57],
+            [55, 56],
           );
           const columns = yield* columnNames;
           assert.include(columns, "auto_settle_disabled_at");
@@ -63,8 +64,8 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
           );
           assert.deepStrictEqual(yield* runMigrations(), []);
           assert.deepStrictEqual(
-            yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id = 57`,
-            [{ name: "RepairAutoSettleDisabledAt" }],
+            yield* sql`SELECT name FROM effect_sql_migrations WHERE migration_id > 56`,
+            [],
           );
         }),
     );
@@ -72,7 +73,7 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
 );
 
 it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
-  "057_RepairAutoSettleDisabledAt on an upstream database",
+  "fork schema repairs on an upstream database",
   (it) => {
     it.effect("keeps the column and its values when it is already present", () =>
       Effect.gen(function* () {
@@ -85,7 +86,7 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
 
         const executed = yield* runMigrations();
 
-        assert.deepStrictEqual(executed, [[57, "RepairAutoSettleDisabledAt"]]);
+        assert.deepStrictEqual(executed, []);
         assert.deepStrictEqual(
           yield* sql`
           SELECT auto_settle_disabled_at AS "autoSettleDisabledAt" FROM projection_threads
