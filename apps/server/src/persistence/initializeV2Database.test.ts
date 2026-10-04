@@ -196,3 +196,133 @@ it.effect("starts fresh without V1 and never imports over existing V2 state", ()
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true }))),
   );
 });
+
+it.effect(
+  "carries V1 runtime rows and cursors into V2 and adds the resume bridge table there only",
+  () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v1-v2-runtime-"));
+    const sourcePath = NodePath.join(directory, "state.sqlite");
+    const destinationPath = NodePath.join(directory, "statev2.sqlite");
+    const claudeCursor =
+      '{"threadId":"thread-claude","resume":"3f2b8c1e-7d4a-4e6b-9a5c-0d1e2f3a4b5c","resumeSessionAt":"9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d","turnCount":2,"turnStartMessageIds":["m1",null]}';
+    const codexCursor = '{"threadId":"019e3f5a-codex-native-thread"}';
+    const cursorCursor = '{"schemaVersion":1,"sessionId":"0b9d4a52-6c7e-4f18-a3b2-5d6e7f8091a2"}';
+    const seed = Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 52 });
+      for (const [threadId, providerName, instanceId, cursor, status] of [
+        ["thread-claude", "claudeAgent", "claudeAgent", claudeCursor, "running"],
+        ["thread-codex", "codex", null, codexCursor, "stopped"],
+        ["thread-cursor", "cursor", "cursor", cursorCursor, "running"],
+      ] as const) {
+        yield* sql`INSERT INTO provider_session_runtime (
+        thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status,
+        last_seen_at, resume_cursor_json, runtime_payload_json
+      ) VALUES (
+        ${threadId}, ${providerName}, ${instanceId}, ${providerName}, 'full-access', ${status},
+        '2026-01-02T03:04:05.000Z', ${cursor}, '{"cwd":"/tmp/project","model":"m"}'
+      )`;
+        yield* sql`INSERT INTO projection_thread_sessions (
+        thread_id, status, provider_name, provider_session_id, provider_thread_id,
+        active_turn_id, last_error, updated_at
+      ) VALUES (${threadId}, ${status === "running" ? "running" : "ready"}, ${providerName},
+        NULL, NULL, NULL, NULL, '2026-01-02T03:04:05.000Z')`;
+      }
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: sourcePath })));
+
+    return Effect.gen(function* () {
+      yield* seed;
+      const original = NodeFS.readFileSync(sourcePath);
+      const config = yield* ServerConfig.ServerConfig;
+      const databaseLayer = SqlitePersistence.layerConfig.pipe(
+        Layer.provide(ServerConfig.layer({ ...config, dbPath: destinationPath })),
+      );
+      yield* initializeV2Database(destinationPath);
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        // Cursors are byte-for-byte what V1 stored: the bridge reads them as written.
+        assert.deepStrictEqual(
+          yield* sql`
+          SELECT thread_id, provider_name, provider_instance_id, status, last_seen_at,
+            resume_cursor_json, runtime_payload_json
+          FROM provider_session_runtime ORDER BY thread_id
+        `,
+          [
+            {
+              thread_id: "thread-claude",
+              provider_name: "claudeAgent",
+              provider_instance_id: "claudeAgent",
+              status: "running",
+              last_seen_at: "2026-01-02T03:04:05.000Z",
+              resume_cursor_json: claudeCursor,
+              runtime_payload_json: '{"cwd":"/tmp/project","model":"m"}',
+            },
+            {
+              thread_id: "thread-codex",
+              provider_name: "codex",
+              provider_instance_id: null,
+              status: "stopped",
+              last_seen_at: "2026-01-02T03:04:05.000Z",
+              resume_cursor_json: codexCursor,
+              runtime_payload_json: '{"cwd":"/tmp/project","model":"m"}',
+            },
+            {
+              thread_id: "thread-cursor",
+              provider_name: "cursor",
+              provider_instance_id: "cursor",
+              status: "running",
+              last_seen_at: "2026-01-02T03:04:05.000Z",
+              resume_cursor_json: cursorCursor,
+              runtime_payload_json: '{"cwd":"/tmp/project","model":"m"}',
+            },
+          ],
+        );
+        // The V1 session status survives too: it decides which threads resume on upgrade.
+        assert.deepStrictEqual(
+          (yield* sql`SELECT thread_id, status FROM projection_thread_sessions ORDER BY thread_id`).map(
+            (row) => [row.thread_id, row.status],
+          ),
+          [
+            ["thread-claude", "running"],
+            ["thread-codex", "ready"],
+            ["thread-cursor", "running"],
+          ],
+        );
+        const bridgeTable = yield* sql`
+        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fork_v1_resume_bridge'
+      `;
+        assert.lengthOf(bridgeTable, 1);
+        assert.deepStrictEqual(yield* sql`SELECT COUNT(*) AS count FROM fork_v1_resume_bridge`, [
+          { count: 0 },
+        ]);
+      }).pipe(Effect.provide(databaseLayer));
+
+      // V1 stays exactly as it was, so the user can still go back to it.
+      assert.deepEqual(NodeFS.readFileSync(sourcePath), original);
+      const v1 = new NodeSqlite.DatabaseSync(sourcePath, { readOnly: true });
+      try {
+        assert.equal(
+          v1
+            .prepare(
+              "SELECT count(*) AS count FROM sqlite_master WHERE name = 'fork_v1_resume_bridge'",
+            )
+            .get()?.count,
+          0,
+        );
+        assert.equal(
+          v1.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get()?.id,
+          52,
+        );
+      } finally {
+        v1.close();
+      }
+    }).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(directory, directory).pipe(Layer.provideMerge(NodeServices.layer)),
+      ),
+      Effect.ensuring(
+        Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      ),
+    );
+  },
+);

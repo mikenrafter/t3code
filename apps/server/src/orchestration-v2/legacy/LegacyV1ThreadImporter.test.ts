@@ -1,5 +1,16 @@
 import { assert, it } from "@effect/vitest";
-import { EventId, ThreadId } from "@t3tools/contracts";
+import {
+  EventId,
+  MessageId,
+  NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderThreadId,
+  RunId,
+  ThreadId,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,20 +18,34 @@ import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { layer as providerSessionRuntimeLayer } from "../../persistence/ProviderSessionRuntime.ts";
 import { listLinkedPullRequestThreads } from "../../pullRequest/linkedThreads.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
+import {
+  CLAUDE_SESSION_UUID,
+  CURSOR_SESSION_UUID,
+  countAllV2Events,
+  parseJson,
+  toJson,
+  readBridgeRow,
+  readRuntimeRow,
+  readThreadEvents,
+  seedV1Thread,
+  v1Cursors,
+} from "./LegacyV1ResumeBridge.testkit.ts";
 
 const databaseLayer = SqlitePersistenceMemory;
 const eventStoreProvided = EventStore.layer.pipe(Layer.provideMerge(databaseLayer));
 const projectionStoreProvided = ProjectionStore.layer.pipe(Layer.provideMerge(databaseLayer));
 const storesProvided = Layer.mergeAll(databaseLayer, eventStoreProvided, projectionStoreProvided);
 const eventSinkProvided = EventSink.layer.pipe(Layer.provide(storesProvided));
+const runtimeRepositoryProvided = providerSessionRuntimeLayer.pipe(Layer.provide(databaseLayer));
 const importerProvided = LegacyV1ThreadImporter.layer.pipe(
-  Layer.provide(Layer.mergeAll(storesProvided, eventSinkProvided)),
+  Layer.provide(Layer.mergeAll(storesProvided, eventSinkProvided, runtimeRepositoryProvided)),
 );
 const projectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
   Layer.provide(storesProvided),
@@ -28,6 +53,7 @@ const projectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
 const TestLayer = Layer.mergeAll(
   storesProvided,
   eventSinkProvided,
+  runtimeRepositoryProvided,
   importerProvided,
   projectionMaintenanceProvided,
 );
@@ -527,6 +553,689 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
         ORDER BY sequence
       `;
       assert.deepStrictEqual(eventsAfterRestart, eventsBeforeRetry);
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // V1 resume bridge: native provider-thread bindings
+  // -------------------------------------------------------------------------
+
+  const providerThreadEventId = (threadId: string) =>
+    `migration:v1:thread:${threadId}:native-provider-thread`;
+  const bindingSelectedEventId = (threadId: string) =>
+    `migration:v1:thread:${threadId}:native-binding-selected`;
+  const bindingId = (threadId: string) => `provider-thread:migration:v1:${threadId}`;
+
+  const readProjection = (threadId: string) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      return yield* projections.getThreadProjection(ThreadId.make(threadId));
+    });
+
+  it.effect("binds a strong native provider thread for each supported V1 provider", () =>
+    Effect.gen(function* () {
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const claudeId = "thread:bind:claude";
+      const codexId = "thread:bind:codex";
+      const cursorId = "thread:bind:cursor";
+      yield* seedV1Thread({
+        threadId: claudeId,
+        modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-6" },
+        runtime: {
+          providerName: "claudeAgent",
+          providerInstanceId: null,
+          cursor: v1Cursors.claudeAgent(claudeId),
+          payload: { cwd: "/tmp/bridge-project", model: "claude-sonnet-4-6" },
+        },
+        sessionStatus: "running",
+      });
+      yield* seedV1Thread({
+        threadId: codexId,
+        runtime: {
+          providerName: "codex",
+          providerInstanceId: "codex",
+          cursor: v1Cursors.codex("019e3f5a-native-codex"),
+          runtimeMode: "approval-required",
+          lastSeenAt: "2026-01-03T09:08:07.000Z",
+        },
+        sessionStatus: "running",
+      });
+      yield* seedV1Thread({
+        threadId: cursorId,
+        modelSelection: { instanceId: "cursor", model: "composer-2.5" },
+        runtime: {
+          providerName: "cursor",
+          providerInstanceId: null,
+          cursor: v1Cursors.cursor(CURSOR_SESSION_UUID),
+        },
+        sessionStatus: "running",
+      });
+
+      const summary = yield* importer.reconcileShells;
+      assert.equal(summary.importedThreadCount, 3);
+
+      const expected = [
+        [claudeId, "claudeAgent", "claudeAgent", CLAUDE_SESSION_UUID],
+        [codexId, "codex", "codex", "019e3f5a-native-codex"],
+        [cursorId, "cursor", "cursor", CURSOR_SESSION_UUID],
+      ] as const;
+      const assertBound = (
+        projection: OrchestrationV2ThreadProjection,
+        [threadId, driver, instanceId, nativeId]: (typeof expected)[number],
+      ) => {
+        assert.lengthOf(projection.providerThreads, 1);
+        const bound = projection.providerThreads[0]!;
+        assert.equal(bound.id, ProviderThreadId.make(bindingId(threadId)));
+        assert.equal(bound.driver, ProviderDriverKind.make(driver));
+        assert.equal(bound.providerInstanceId, ProviderInstanceId.make(instanceId));
+        assert.deepStrictEqual(bound.nativeThreadRef, {
+          driver: ProviderDriverKind.make(driver),
+          nativeId,
+          strength: "strong",
+        });
+        // The V1 cursor's own `resumeSessionAt` is a diagnostic: mapping it here would
+        // make V2 rewind the Claude session to that message.
+        assert.isNull(bound.nativeConversationHeadRef);
+        assert.isNull(bound.providerSessionId);
+        assert.equal(bound.appThreadId, ThreadId.make(threadId));
+        assert.isNull(bound.ownerNodeId);
+        assert.equal(bound.status, "idle");
+        assert.isNull(bound.firstRunOrdinal);
+        assert.isNull(bound.lastRunOrdinal);
+        assert.deepStrictEqual(bound.handoffIds, []);
+        assert.isNull(bound.forkedFrom);
+        assert.deepStrictEqual(bound.pendingBackgroundTasks, []);
+        assert.equal(projection.thread.activeProviderThreadId, bound.id);
+      };
+      for (const entry of expected) {
+        assertBound(yield* readProjection(entry[0]), entry);
+      }
+
+      // The selected model and instance are the thread's own; binding never rewrites them.
+      const codex = yield* readProjection(codexId);
+      assert.deepStrictEqual(codex.thread.modelSelection, {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.4",
+      });
+      assert.equal(codex.thread.historyOrigin, "v1_import");
+
+      // Cold import writes the binding with the shell: one provider-thread event and no
+      // separate selection event, because thread.created already carries the pointer.
+      for (const [threadId] of expected) {
+        const events = yield* readThreadEvents(threadId);
+        assert.equal(events[0]?.event_type, "thread.created");
+        assert.deepStrictEqual(
+          events.filter((event) => event.event_type === "provider-thread.updated"),
+          [{ event_id: providerThreadEventId(threadId), event_type: "provider-thread.updated" }],
+        );
+        assert.notInclude(
+          events.map((event) => event.event_id),
+          bindingSelectedEventId(threadId),
+        );
+      }
+
+      // Replaying the log reproduces the same bindings.
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      for (const entry of expected) {
+        assertBound(yield* readProjection(entry[0]), entry);
+      }
+    }),
+  );
+
+  it.effect("normalizes the runtime row to stopped and keeps its cursor and metadata", () =>
+    Effect.gen(function* () {
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const threadId = "thread:runtime:normalized";
+      const cursor = v1Cursors.claudeAgent(threadId);
+      yield* seedV1Thread({
+        threadId,
+        modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-6" },
+        runtime: {
+          providerName: "claudeAgent",
+          providerInstanceId: null,
+          cursor,
+          status: "running",
+          runtimeMode: "auto-accept-edits",
+          lastSeenAt: "2026-01-03T09:08:07.000Z",
+          payload: { cwd: "/tmp/bridge-project", model: "claude-sonnet-4-6", threadId },
+        },
+        sessionStatus: "running",
+      });
+
+      yield* importer.reconcileShells;
+
+      const runtime = yield* readRuntimeRow(threadId);
+      assert.equal(runtime?.status, "stopped");
+      // A concrete instance id replaces the pre-split null.
+      assert.equal(runtime?.provider_instance_id, "claudeAgent");
+      assert.equal(runtime?.provider_name, "claudeAgent");
+      assert.equal(runtime?.adapter_key, "claudeAgent");
+      assert.equal(runtime?.runtime_mode, "auto-accept-edits");
+      assert.equal(runtime?.last_seen_at, "2026-01-03T09:08:07.000Z");
+      // The complete V1 cursor stays, including the fields V2 does not read.
+      assert.deepStrictEqual(parseJson(runtime?.resume_cursor_json ?? "null"), cursor);
+      assert.deepStrictEqual(parseJson(runtime?.runtime_payload_json ?? "null"), {
+        cwd: "/tmp/bridge-project",
+        model: "claude-sonnet-4-6",
+        threadId,
+      });
+
+      const bridge = yield* readBridgeRow(threadId);
+      assert.equal(bridge?.binding_status, "bound");
+      assert.equal(bridge?.provider_thread_id, bindingId(threadId));
+      // Captured before the row was normalized.
+      assert.equal(bridge?.source_session_status, "running");
+      const source = parseJson(bridge?.source_runtime_json ?? "null");
+      assert.equal(source.status, "running");
+      assert.isNull(source.providerInstanceId);
+      assert.deepStrictEqual(source.resumeCursor, cursor);
+      assert.deepStrictEqual(parseJson(bridge?.source_model_selection_json ?? "null"), {
+        instanceId: "claudeAgent",
+        model: "claude-sonnet-4-6",
+      });
+      assert.equal(bridge?.continuation_status, "pending");
+    }),
+  );
+
+  it.effect("keeps an explicit runtime instance and routes a null one to the driver default", () =>
+    Effect.gen(function* () {
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const explicitId = "thread:instance:explicit";
+      const defaultedId = "thread:instance:defaulted";
+      yield* seedV1Thread({
+        threadId: explicitId,
+        modelSelection: { instanceId: "codex-work", model: "gpt-5.4" },
+        runtime: {
+          providerName: "codex",
+          providerInstanceId: "codex-work",
+          cursor: v1Cursors.codex("native-work"),
+        },
+        sessionStatus: "running",
+      });
+      yield* seedV1Thread({
+        threadId: defaultedId,
+        runtime: {
+          providerName: "codex",
+          providerInstanceId: null,
+          cursor: v1Cursors.codex("native-default"),
+        },
+        sessionStatus: "running",
+      });
+
+      yield* importer.reconcileShells;
+
+      const explicit = yield* readProjection(explicitId);
+      assert.equal(explicit.providerThreads[0]?.providerInstanceId, "codex-work");
+      assert.equal((yield* readRuntimeRow(explicitId))?.provider_instance_id, "codex-work");
+      const defaulted = yield* readProjection(defaultedId);
+      assert.equal(defaulted.providerThreads[0]?.providerInstanceId, "codex");
+      assert.equal((yield* readRuntimeRow(defaultedId))?.provider_instance_id, "codex");
+    }),
+  );
+
+  it.effect("keeps the binding but never resumes automatically across a provider switch", () =>
+    Effect.gen(function* () {
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const threadId = "thread:instance:switched";
+      // The user moved this thread to Claude after its last Codex session.
+      yield* seedV1Thread({
+        threadId,
+        modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-4-6" },
+        runtime: {
+          providerName: "codex",
+          providerInstanceId: "codex",
+          cursor: v1Cursors.codex("native-before-switch"),
+        },
+        sessionStatus: "running",
+      });
+
+      yield* importer.reconcileShells;
+
+      const projection = yield* readProjection(threadId);
+      assert.equal(projection.thread.modelSelection.instanceId, "claudeAgent");
+      assert.equal(projection.thread.providerInstanceId, "claudeAgent");
+      assert.equal(projection.providerThreads[0]?.providerInstanceId, "codex");
+      assert.equal(
+        projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+        "native-before-switch",
+      );
+      const bridge = yield* readBridgeRow(threadId);
+      assert.equal(bridge?.binding_status, "bound");
+      assert.equal(bridge?.continuation_status, "skipped");
+    }),
+  );
+
+  it.effect("continues only threads whose V1 session was running", () =>
+    Effect.gen(function* () {
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const cases = [
+        ["thread:eligible:running", "running", "pending"],
+        // V1 maps both session `ready` and `running` to a running runtime row.
+        ["thread:eligible:ready", "ready", "skipped"],
+        ["thread:eligible:stopped", "stopped", "skipped"],
+        ["thread:eligible:interrupted", "interrupted", "skipped"],
+        ["thread:eligible:error", "error", "skipped"],
+        ["thread:eligible:no-session-row", undefined, "skipped"],
+      ] as const;
+      for (const [threadId, sessionStatus] of cases) {
+        yield* seedV1Thread({
+          threadId,
+          runtime: {
+            providerName: "codex",
+            providerInstanceId: "codex",
+            cursor: v1Cursors.codex(`native:${threadId}`),
+            status: "running",
+          },
+          ...(sessionStatus === undefined ? {} : { sessionStatus }),
+        });
+      }
+
+      yield* importer.reconcileShells;
+
+      for (const [threadId, sessionStatus, continuation] of cases) {
+        const bridge = yield* readBridgeRow(threadId);
+        assert.equal(bridge?.binding_status, "bound", threadId);
+        assert.equal(bridge?.continuation_status, continuation, threadId);
+        assert.equal(bridge?.source_session_status, sessionStatus ?? null, threadId);
+        // Every one of them still resumes natively on the next manual turn.
+        assert.equal((yield* readProjection(threadId)).providerThreads.length, 1, threadId);
+      }
+    }),
+  );
+
+  it.effect("binds archived and deleted threads for restoration but never continues them", () =>
+    Effect.gen(function* () {
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const archivedId = "thread:retired:archived";
+      const deletedId = "thread:retired:deleted";
+      for (const [threadId, retired] of [
+        [archivedId, { archivedAt: "2026-01-05T00:00:00.000Z" }],
+        [deletedId, { deletedAt: "2026-01-05T00:00:00.000Z" }],
+      ] as const) {
+        yield* seedV1Thread({
+          threadId,
+          ...retired,
+          runtime: {
+            providerName: "codex",
+            providerInstanceId: "codex",
+            cursor: v1Cursors.codex(`native:${threadId}`),
+          },
+          sessionStatus: "running",
+        });
+      }
+
+      yield* importer.reconcileShells;
+
+      for (const threadId of [archivedId, deletedId]) {
+        const bridge = yield* readBridgeRow(threadId);
+        assert.equal(bridge?.binding_status, "bound", threadId);
+        assert.equal(bridge?.continuation_status, "skipped", threadId);
+        const projection = yield* readProjection(threadId);
+        assert.equal(
+          projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+          `native:${threadId}`,
+        );
+        assert.equal(projection.thread.activeProviderThreadId, bindingId(threadId));
+      }
+    }),
+  );
+
+  it.effect("leaves a thread unbound when its V1 cursor cannot name a native session", () =>
+    Effect.gen(function* () {
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const cases = [
+        // Claude cursor with only the T3 thread id.
+        [
+          "thread:unbound:claude-no-session",
+          "claudeAgent",
+          { threadId: "thread:unbound" },
+          "missing-native-id",
+        ],
+        ["thread:unbound:codex-empty", "codex", { threadId: "" }, "missing-native-id"],
+        [
+          "thread:unbound:cursor-version",
+          "cursor",
+          { schemaVersion: 2, sessionId: "abc" },
+          "unsupported-cursor-version",
+        ],
+        ["thread:unbound:provider", "opencode", { threadId: "native" }, "unsupported-provider"],
+        ["thread:unbound:null-cursor", "codex", null, "missing-cursor"],
+      ] as const;
+      for (const [threadId, providerName, cursor] of cases) {
+        yield* seedV1Thread({
+          threadId,
+          runtime: { providerName, providerInstanceId: null, cursor },
+          sessionStatus: "running",
+        });
+      }
+      const malformedId = "thread:unbound:malformed-json";
+      yield* seedV1Thread({
+        threadId: malformedId,
+        runtime: { providerName: "codex", providerInstanceId: null, cursor: "{not json" },
+        sessionStatus: "running",
+      });
+      const noRuntimeId = "thread:unbound:no-runtime";
+      yield* seedV1Thread({ threadId: noRuntimeId, sessionStatus: "running" });
+
+      const summary = yield* importer.reconcileShells;
+      // Unusable cursors never stop the import of the thread itself.
+      assert.equal(summary.importedThreadCount, cases.length + 2);
+
+      for (const [threadId, , , reason] of cases) {
+        const projection = yield* readProjection(threadId);
+        assert.isEmpty(projection.providerThreads, threadId);
+        assert.isNull(projection.thread.activeProviderThreadId, threadId);
+        const bridge = yield* readBridgeRow(threadId);
+        assert.equal(bridge?.binding_status, "unavailable", threadId);
+        assert.equal(bridge?.reason, reason, threadId);
+        assert.isNull(bridge?.provider_thread_id, threadId);
+        assert.equal(bridge?.continuation_status, "skipped", threadId);
+        // The runtime row is left exactly as V1 wrote it.
+        assert.equal((yield* readRuntimeRow(threadId))?.status, "running", threadId);
+        assert.isNull((yield* readRuntimeRow(threadId))?.provider_instance_id, threadId);
+      }
+      for (const threadId of [malformedId, noRuntimeId]) {
+        const projection = yield* readProjection(threadId);
+        assert.isEmpty(projection.providerThreads, threadId);
+        assert.isNull(projection.thread.activeProviderThreadId, threadId);
+        const events = yield* readThreadEvents(threadId);
+        assert.notInclude(
+          events.map((event) => event.event_type),
+          "provider-thread.updated",
+        );
+      }
+      assert.equal((yield* readBridgeRow(malformedId))?.binding_status, "unavailable");
+    }),
+  );
+
+  it.effect(
+    "binds shells imported before the bridge existed, once, with a separate selection event",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+        const threadId = "thread:repair:prebridge";
+        const cursor = v1Cursors.codex("native-repaired");
+        // The shell is imported while V1 has no runtime row, as the earlier build did.
+        yield* seedV1Thread({ threadId });
+        yield* importer.reconcileShells;
+        yield* sql`DELETE FROM fork_v1_resume_bridge WHERE thread_id = ${threadId}`;
+        yield* sql`
+        INSERT INTO provider_session_runtime (
+          thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status,
+          last_seen_at, resume_cursor_json, runtime_payload_json
+        ) VALUES (
+          ${threadId}, 'codex', NULL, 'codex', 'full-access', 'running',
+          '2026-01-04T02:00:00.000Z', ${toJson(cursor)}, '{"cwd":"/tmp/bridge-project"}'
+        )
+      `;
+        yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, provider_session_id, provider_thread_id,
+          active_turn_id, last_error, updated_at
+        ) VALUES (${threadId}, 'running', 'codex', NULL, NULL, NULL, NULL, '2026-01-04T02:00:00.000Z')
+      `;
+        const before = yield* readProjection(threadId);
+        assert.isNull(before.thread.activeProviderThreadId);
+        const eventsBefore = yield* readThreadEvents(threadId);
+
+        yield* importer.reconcileShells;
+
+        const projection = yield* readProjection(threadId);
+        assert.equal(projection.providerThreads[0]?.id, bindingId(threadId));
+        assert.deepStrictEqual(projection.providerThreads[0]?.nativeThreadRef, {
+          driver: ProviderDriverKind.make("codex"),
+          nativeId: "native-repaired",
+          strength: "strong",
+        });
+        assert.equal(projection.thread.activeProviderThreadId, bindingId(threadId));
+        // Nothing else about the thread changes.
+        assert.equal(projection.thread.title, before.thread.title);
+        assert.deepStrictEqual(projection.thread.modelSelection, before.thread.modelSelection);
+        assert.deepStrictEqual((yield* readThreadEvents(threadId)).slice(eventsBefore.length), [
+          { event_id: providerThreadEventId(threadId), event_type: "provider-thread.updated" },
+          { event_id: bindingSelectedEventId(threadId), event_type: "thread.metadata-updated" },
+        ]);
+        const runtime = yield* readRuntimeRow(threadId);
+        assert.equal(runtime?.status, "stopped");
+        assert.equal(runtime?.provider_instance_id, "codex");
+        assert.deepStrictEqual(parseJson(runtime?.resume_cursor_json ?? "null"), cursor);
+        const bridge = yield* readBridgeRow(threadId);
+        assert.equal(bridge?.binding_status, "bound");
+        assert.equal(bridge?.source_session_status, "running");
+        assert.equal(parseJson(bridge?.source_runtime_json ?? "null").status, "running");
+        assert.equal(bridge?.continuation_status, "pending");
+      }),
+  );
+
+  it.effect("emits nothing when reconciliation repeats", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const coldId = "thread:repeat:cold";
+      const repairedId = "thread:repeat:repaired";
+      yield* seedV1Thread({
+        threadId: coldId,
+        runtime: { providerName: "codex", providerInstanceId: null, cursor: v1Cursors.codex("n1") },
+        sessionStatus: "running",
+      });
+      yield* seedV1Thread({ threadId: repairedId });
+      yield* importer.reconcileShells;
+      yield* sql`DELETE FROM fork_v1_resume_bridge WHERE thread_id = ${repairedId}`;
+      yield* sql`
+        INSERT INTO provider_session_runtime (
+          thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status,
+          last_seen_at, resume_cursor_json, runtime_payload_json
+        ) VALUES (${repairedId}, 'codex', NULL, 'codex', 'full-access', 'running',
+          '2026-01-04T02:00:00.000Z', ${toJson(v1Cursors.codex("n2"))}, NULL)
+      `;
+      yield* importer.reconcileShells;
+      const bridgeRows = sql`SELECT * FROM fork_v1_resume_bridge ORDER BY thread_id`;
+      const runtimeRows = sql`SELECT * FROM provider_session_runtime ORDER BY thread_id`;
+      const bridgeBefore = yield* bridgeRows;
+      const runtimeBefore = yield* runtimeRows;
+      const eventsBefore = yield* countAllV2Events;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        assert.deepStrictEqual(yield* importer.reconcileShells, {
+          importedThreadCount: 0,
+          importedMessageCount: 0,
+        });
+      }
+
+      assert.equal(yield* countAllV2Events, eventsBefore);
+      assert.deepStrictEqual(yield* bridgeRows, bridgeBefore);
+      assert.deepStrictEqual(yield* runtimeRows, runtimeBefore);
+      // A fresh importer (a restart) is just as quiet.
+      assert.deepStrictEqual(
+        yield* Effect.gen(function* () {
+          const restarted = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+          return yield* restarted.reconcileShells;
+        }).pipe(Effect.provide(LegacyV1ThreadImporter.layer)),
+        { importedThreadCount: 0, importedMessageCount: 0 },
+      );
+      assert.equal(yield* countAllV2Events, eventsBefore);
+    }),
+  );
+
+  it.effect("does not touch shells that already have a V2 provider thread or V2 runs", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const boundId = "thread:v2-used:bound";
+      const ranId = "thread:v2-used:ran";
+      yield* seedV1Thread({ threadId: boundId });
+      yield* seedV1Thread({ threadId: ranId });
+      yield* importer.reconcileShells;
+      for (const threadId of [boundId, ranId]) {
+        yield* sql`DELETE FROM fork_v1_resume_bridge WHERE thread_id = ${threadId}`;
+      }
+
+      // V2 already gave the first thread its own native thread.
+      const now = DateTime.makeUnsafe("2026-02-01T00:00:00.000Z");
+      const bound = yield* readProjection(boundId);
+      const v2ProviderThreadId = ProviderThreadId.make("provider-thread:v2:own");
+      const driver = ProviderDriverKind.make("codex");
+      const instanceId = ProviderInstanceId.make("codex");
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:v2-used:provider-thread"),
+            type: "provider-thread.updated",
+            threadId: ThreadId.make(boundId),
+            driver,
+            providerInstanceId: instanceId,
+            occurredAt: now,
+            payload: {
+              id: v2ProviderThreadId,
+              driver,
+              providerInstanceId: instanceId,
+              providerSessionId: null,
+              appThreadId: ThreadId.make(boundId),
+              ownerNodeId: null,
+              nativeThreadRef: { driver, nativeId: "native-v2-own", strength: "strong" },
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 1,
+              handoffIds: [],
+              forkedFrom: null,
+              pendingBackgroundTasks: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            id: EventId.make("event:v2-used:select"),
+            type: "thread.metadata-updated",
+            threadId: ThreadId.make(boundId),
+            providerInstanceId: instanceId,
+            occurredAt: now,
+            payload: {
+              ...bound.thread,
+              activeProviderThreadId: v2ProviderThreadId,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+
+      // V2 already ran, and failed, on the second thread before it ever bound a provider thread.
+      const ranThread = yield* readProjection(ranId);
+      const run: OrchestrationV2Run = {
+        id: RunId.make("run:v2-used:failed"),
+        threadId: ThreadId.make(ranId),
+        ordinal: 1,
+        providerInstanceId: instanceId,
+        modelSelection: ranThread.thread.modelSelection,
+        providerThreadId: ProviderThreadId.make("provider-thread:pending:run:v2-used:failed"),
+        userMessageId: MessageId.make("message:v2-used:user"),
+        rootNodeId: NodeId.make("node:v2-used:root"),
+        activeAttemptId: null,
+        status: "failed",
+        requestedAt: now,
+        startedAt: now,
+        completedAt: now,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:v2-used:run"),
+            type: "run.created",
+            threadId: ThreadId.make(ranId),
+            runId: run.id,
+            providerInstanceId: instanceId,
+            occurredAt: now,
+            payload: run,
+          },
+        ],
+      });
+
+      // V1 runtime rows for both appear only now, as a pre-bridge database would have them.
+      for (const threadId of [boundId, ranId]) {
+        yield* sql`
+          INSERT INTO provider_session_runtime (
+            thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status,
+            last_seen_at, resume_cursor_json, runtime_payload_json
+          ) VALUES (${threadId}, 'codex', NULL, 'codex', 'full-access', 'running',
+            '2026-01-04T02:00:00.000Z', ${toJson(v1Cursors.codex(`v1:${threadId}`))}, NULL)
+        `;
+        yield* sql`
+          INSERT INTO projection_thread_sessions (
+            thread_id, status, provider_name, provider_session_id, provider_thread_id,
+            active_turn_id, last_error, updated_at
+          ) VALUES (${threadId}, 'running', 'codex', NULL, NULL, NULL, NULL, '2026-01-04T02:00:00.000Z')
+        `;
+      }
+      const runtimeBefore = yield* sql`SELECT * FROM provider_session_runtime
+        WHERE thread_id IN (${boundId}, ${ranId}) ORDER BY thread_id`;
+      const eventsBefore = yield* countAllV2Events;
+
+      yield* importer.reconcileShells;
+
+      assert.equal(yield* countAllV2Events, eventsBefore);
+      const boundAfter = yield* readProjection(boundId);
+      assert.equal(boundAfter.thread.activeProviderThreadId, v2ProviderThreadId);
+      assert.deepStrictEqual(
+        boundAfter.providerThreads.map((thread) => thread.id),
+        [v2ProviderThreadId],
+      );
+      const ranAfter = yield* readProjection(ranId);
+      assert.isEmpty(ranAfter.providerThreads);
+      assert.isNull(ranAfter.thread.activeProviderThreadId);
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM provider_session_runtime
+          WHERE thread_id IN (${boundId}, ${ranId}) ORDER BY thread_id`,
+        runtimeBefore,
+      );
+      for (const threadId of [boundId, ranId]) {
+        const bridge = yield* readBridgeRow(threadId);
+        assert.notEqual(bridge?.binding_status, "bound", threadId);
+        assert.notEqual(bridge?.continuation_status, "pending", threadId);
+      }
+    }),
+  );
+
+  it.effect("rolls back the whole thread, including its bridge record, when the import fails", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const threadId = "thread:rollback";
+      const cursor = v1Cursors.codex("native-rollback");
+      yield* seedV1Thread({
+        threadId,
+        runtime: { providerName: "codex", providerInstanceId: null, cursor },
+        sessionStatus: "running",
+      });
+      const runtimeBefore = yield* readRuntimeRow(threadId);
+      const eventsBefore = yield* countAllV2Events;
+      // The import marker is the last write of the shell transaction.
+      yield* sql`
+        CREATE TRIGGER fail_rollback_import BEFORE INSERT ON orchestration_v2_legacy_imports
+        WHEN NEW.thread_id = 'thread:rollback'
+        BEGIN SELECT RAISE(ABORT, 'simulated import failure'); END
+      `;
+
+      const failed = yield* Effect.result(importer.reconcileShells);
+      yield* sql`DROP TRIGGER fail_rollback_import`;
+
+      assert.equal(failed._tag, "Failure");
+      assert.equal(yield* countAllV2Events, eventsBefore);
+      assert.isUndefined(yield* readBridgeRow(threadId));
+      assert.deepStrictEqual(yield* readRuntimeRow(threadId), runtimeBefore);
+      assert.deepStrictEqual(yield* readThreadEvents(threadId), []);
+
+      // The next startup retries from scratch and completes the binding.
+      yield* importer.reconcileShells;
+      const bridge = yield* readBridgeRow(threadId);
+      assert.equal(bridge?.binding_status, "bound");
+      assert.equal(bridge?.continuation_status, "pending");
+      assert.equal((yield* readProjection(threadId)).providerThreads[0]?.id, bindingId(threadId));
+      assert.equal((yield* readRuntimeRow(threadId))?.status, "stopped");
     }),
   );
 });
