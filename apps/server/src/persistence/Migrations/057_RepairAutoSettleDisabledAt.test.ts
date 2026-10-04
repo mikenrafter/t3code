@@ -25,8 +25,9 @@ const insertThread = Effect.gen(function* () {
   `;
 });
 
+// Each case needs its own database: `it.layer` shares one connection per block.
 it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
-  "057_RepairAutoSettleDisabledAt",
+  "057_RepairAutoSettleDisabledAt on a fork database",
   (it) => {
     it.effect(
       "adds auto_settle_disabled_at to a fork database that recorded migration 54 as another migration",
@@ -67,7 +68,12 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
           );
         }),
     );
+  },
+);
 
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
+  "057_RepairAutoSettleDisabledAt on an upstream database",
+  (it) => {
     it.effect("keeps the column and its values when it is already present", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
