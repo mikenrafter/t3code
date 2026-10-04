@@ -442,34 +442,43 @@ function useFileLineReveal(
       }
 
       const resolveScrollTarget = (line: number): number | null => {
-        const linePosition = instance.getLinePosition(line);
-        if (!linePosition) return null;
+        // instance.getLinePosition and the DOM readbacks below reach into the
+        // vendored diff renderer, which can throw on a line that hasn't
+        // hydrated yet (e.g. a stale revealLine racing a fresh mount). A throw
+        // here happens during a render-phase callback, so left unguarded it
+        // crashes the whole route instead of just skipping this reveal.
+        try {
+          const linePosition = instance.getLinePosition(line);
+          if (!linePosition) return null;
 
-        const scrollContainerRect = scrollContainer.getBoundingClientRect();
-        const fileTop =
-          scrollContainer.scrollTop +
-          fileContainer.getBoundingClientRect().top -
-          scrollContainerRect.top;
-        const root = fileContainer.shadowRoot ?? fileContainer;
-        const renderedLineElement = root.querySelector<HTMLElement>(`[data-line="${line}"]`);
-        const renderedLineRect = renderedLineElement?.getBoundingClientRect();
+          const scrollContainerRect = scrollContainer.getBoundingClientRect();
+          const fileTop =
+            scrollContainer.scrollTop +
+            fileContainer.getBoundingClientRect().top -
+            scrollContainerRect.top;
+          const root = fileContainer.shadowRoot ?? fileContainer;
+          const renderedLineElement = root.querySelector<HTMLElement>(`[data-line="${line}"]`);
+          const renderedLineRect = renderedLineElement?.getBoundingClientRect();
 
-        return resolveCenteredFileLineScrollTop({
-          scrollTop: scrollContainer.scrollTop,
-          scrollHeight: scrollContainer.scrollHeight,
-          viewportTop: scrollContainerRect.top,
-          viewportHeight: scrollContainer.clientHeight,
-          fileTop,
-          estimatedLine: linePosition,
-          ...(renderedLineRect && renderedLineRect.height > 0
-            ? {
-                renderedLine: {
-                  top: renderedLineRect.top,
-                  height: renderedLineRect.height,
-                },
-              }
-            : {}),
-        });
+          return resolveCenteredFileLineScrollTop({
+            scrollTop: scrollContainer.scrollTop,
+            scrollHeight: scrollContainer.scrollHeight,
+            viewportTop: scrollContainerRect.top,
+            viewportHeight: scrollContainer.clientHeight,
+            fileTop,
+            estimatedLine: linePosition,
+            ...(renderedLineRect && renderedLineRect.height > 0
+              ? {
+                  renderedLine: {
+                    top: renderedLineRect.top,
+                    height: renderedLineRect.height,
+                  },
+                }
+              : {}),
+          });
+        } catch {
+          return null;
+        }
       };
 
       const guardScrollTarget = (line: number) => {
