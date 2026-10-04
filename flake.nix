@@ -88,7 +88,7 @@
                 src = self;
                 pnpmDeps = old.pnpmDeps.override {
                   src = self;
-                  hash = "sha256-0YplEpvx75y6NsjS+Re1EWkbbC5x083ZTY6q4F7Tggo=";
+                  hash = "sha256-WZSV8+ugCLfls7jW7hPFoL4wYAffpER71zt2VhaTVzQ=";
                 };
               });
         };
