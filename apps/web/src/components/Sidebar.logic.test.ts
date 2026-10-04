@@ -22,6 +22,7 @@ import {
   getSidebarThreadIdsToPrewarm,
   hasUnseenCompletion,
   isContextMenuPointerDown,
+  isExternalThreadStatusActive,
   isSidebarSubagentThread,
   isSidebarThreadWorking,
   isTrailingDoubleClick,
@@ -35,6 +36,7 @@ import {
   resolveSidebarThreadSection,
   resolveSidebarRowAccessibility,
   resolveSidebarThreadStatus,
+  resolveSidebarV2ExternalStatus,
   resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
   resolveThreadRowClassName,
@@ -2269,6 +2271,144 @@ describe("Working shelf (beta)", () => {
         unsettle: false,
         unsnooze: false,
       });
+    });
+  });
+});
+
+describe("external thread status overlay", () => {
+  const overlay = {
+    source: "usagewindow",
+    key: "compacting",
+    text: "Compacting",
+    icon: "shrink",
+    color: "amber",
+    notifyUser: true,
+    expiresAt: "2026-09-22T12:00:00.000Z",
+    clearsOn: null,
+    updatedAt: "2026-09-22T11:55:00.000Z",
+  } as const;
+  const before = Date.parse("2026-09-22T11:59:00.000Z");
+  const after = Date.parse("2026-09-22T12:01:00.000Z");
+
+  describe("isExternalThreadStatusActive", () => {
+    it("is active until it expires and never when absent", () => {
+      expect(isExternalThreadStatusActive(overlay, before)).toBe(true);
+      expect(isExternalThreadStatusActive(overlay, after)).toBe(false);
+      expect(isExternalThreadStatusActive(overlay, Date.parse(overlay.expiresAt))).toBe(false);
+      expect(isExternalThreadStatusActive(null, before)).toBe(false);
+      expect(isExternalThreadStatusActive(undefined, before)).toBe(false);
+    });
+
+    it("stays active indefinitely without an expiry", () => {
+      expect(isExternalThreadStatusActive({ ...overlay, expiresAt: null }, after)).toBe(true);
+    });
+
+    it("leaves native-transition clearing to the server", () => {
+      // The server drops the overlay durably; the client only hides expired ones.
+      expect(isExternalThreadStatusActive({ ...overlay, clearsOn: "work" }, before)).toBe(true);
+    });
+  });
+
+  describe("resolveSidebarV2ExternalStatus", () => {
+    it.each(["working", "waiting", "ready"] as const)(
+      "renders the overlay over the native %s state",
+      (status) => {
+        expect(
+          resolveSidebarV2ExternalStatus({ status, externalStatus: overlay, now: before }),
+        ).toBe(overlay);
+      },
+    );
+
+    it.each(["approval", "input", "failed", "limited"] as const)(
+      "lets the native %s state take precedence",
+      (status) => {
+        expect(
+          resolveSidebarV2ExternalStatus({ status, externalStatus: overlay, now: before }),
+        ).toBeNull();
+      },
+    );
+
+    it("hides an expired overlay and tolerates a missing one", () => {
+      expect(
+        resolveSidebarV2ExternalStatus({
+          status: "ready",
+          externalStatus: overlay,
+          now: after,
+        }),
+      ).toBeNull();
+      expect(
+        resolveSidebarV2ExternalStatus({ status: "ready", externalStatus: null, now: before }),
+      ).toBeNull();
+      expect(
+        resolveSidebarV2ExternalStatus({ status: "ready", externalStatus: undefined, now: before }),
+      ).toBeNull();
+    });
+  });
+
+  describe("resolveThreadStatusPill", () => {
+    const runtime = {
+      status: "idle" as const,
+      providerName: "Codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      activeRunId: null,
+      lastError: null,
+      updatedAt: "2026-09-22T11:50:00.000Z",
+    };
+    const thread = {
+      hasActionableProposedPlan: false,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      interactionMode: "default" as const,
+      latestRun: null,
+      lastVisitedAt: undefined,
+      runtime,
+      externalStatus: { ...overlay, expiresAt: "2099-09-22T12:00:00.000Z" },
+    };
+
+    it("shows an active overlay with its text and color", () => {
+      expect(resolveThreadStatusPill({ thread })).toMatchObject({
+        label: "Compacting",
+        colorClass: expect.stringContaining("amber"),
+        pulse: false,
+      });
+    });
+
+    it("shows the overlay over native working", () => {
+      expect(
+        resolveThreadStatusPill({
+          thread: {
+            ...thread,
+            runtime: { ...runtime, status: "running", activeRunId: "run-1" as never },
+          },
+        }),
+      ).toMatchObject({ label: "Compacting" });
+    });
+
+    it("hides an expired overlay", () => {
+      expect(resolveThreadStatusPill({ thread })).toMatchObject({ label: "Compacting" });
+      expect(
+        resolveThreadStatusPill({
+          thread: {
+            ...thread,
+            externalStatus: { ...overlay, expiresAt: "2000-01-01T00:00:00.000Z" },
+          },
+        }),
+      ).toBeNull();
+    });
+
+    it("keeps native approval, input, and failure ahead of the overlay", () => {
+      expect(resolveThreadStatusPill({ thread })).toMatchObject({ label: "Compacting" });
+      expect(
+        resolveThreadStatusPill({ thread: { ...thread, hasPendingApprovals: true } }),
+      ).toMatchObject({ label: "Pending Approval" });
+      expect(
+        resolveThreadStatusPill({ thread: { ...thread, hasPendingUserInput: true } }),
+      ).toMatchObject({ label: "Awaiting Input" });
+      expect(
+        resolveThreadStatusPill({
+          thread: { ...thread, runtime: { ...runtime, status: "failed", lastError: "boom" } },
+        }),
+      ).toBeNull();
     });
   });
 });

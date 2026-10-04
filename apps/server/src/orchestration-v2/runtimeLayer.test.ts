@@ -1974,6 +1974,115 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect(
+    "stores external thread statuses, clears them on matching native work, and survives rebuilds",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+        const projectId = ProjectId.make("runtime-layer-external-status-project");
+        const status = (
+          key: string,
+          clearsOn: "work" | "error" | "done" | `custom:${string}` | null,
+        ) =>
+          ({
+            source: "usagewindow",
+            key,
+            text: key,
+            icon: "clock",
+            color: "amber",
+            notifyUser: false,
+            expiresAt: null,
+            clearsOn,
+            updatedAt: "2026-09-22T11:55:00.000Z",
+          }) as const;
+        const createThread = (name: string) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make(`runtime-layer-external-status-${name}`);
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`runtime-layer-external-status-${name}-create`),
+              threadId,
+              projectId,
+              title: `External status ${name}`,
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: process.cwd(),
+            });
+            return threadId;
+          });
+        const setStatus = (threadId: ThreadId, externalStatus: ReturnType<typeof status> | null) =>
+          orchestrator.dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make(
+              `runtime-layer-external-status-${threadId}-${externalStatus?.key ?? "clear"}`,
+            ),
+            threadId,
+            externalStatus,
+          });
+        const startWork = (threadId: ThreadId) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`runtime-layer-external-status-${threadId}-work`),
+            threadId,
+            messageId: MessageId.make(`runtime-layer-external-status-${threadId}-work`),
+            text: "Start work.",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          });
+        const read = (threadId: ThreadId) =>
+          Effect.gen(function* () {
+            const thread = (yield* orchestrator.getThreadProjection(threadId)).thread;
+            const shell = yield* orchestrator.getThreadShell(threadId);
+            assert.isNotNull(shell);
+            assert.deepEqual(shell.externalStatus, thread.externalStatus);
+            return thread.externalStatus;
+          });
+
+        const set = yield* createThread("set");
+        yield* setStatus(set, status("compacting", "custom:resume-complete"));
+        assert.deepEqual(yield* read(set), status("compacting", "custom:resume-complete"));
+        // Other metadata edits leave the overlay alone.
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("runtime-layer-external-status-rename"),
+          threadId: set,
+          title: "Renamed while overlaid",
+        });
+        assert.deepEqual(yield* read(set), status("compacting", "custom:resume-complete"));
+        yield* setStatus(set, null);
+        assert.isNull(yield* read(set));
+
+        const work = yield* createThread("work");
+        const unowned = yield* createThread("unowned");
+        const custom = yield* createThread("custom");
+        yield* setStatus(work, status("paused", "work"));
+        yield* setStatus(unowned, status("scheduled", null));
+        yield* setStatus(custom, status("waiting", "custom:resume-complete"));
+
+        // A user message starts a run; only the status that clears on work goes away.
+        yield* startWork(work);
+        yield* startWork(unowned);
+        yield* startWork(custom);
+        assert.isNull(yield* read(work));
+        assert.deepEqual(yield* read(unowned), status("scheduled", null));
+        assert.deepEqual(yield* read(custom), status("waiting", "custom:resume-complete"));
+
+        // The clear is part of the projection, so a rebuild reproduces it.
+        const rebuilt = yield* maintenance.rebuild;
+        assert.isTrue(rebuilt.valid);
+        assert.isNull(yield* read(work));
+        assert.deepEqual(yield* read(unowned), status("scheduled", null));
+        assert.deepEqual(yield* read(custom), status("waiting", "custom:resume-complete"));
+      }),
+  );
+
   it.effect("keeps the branch pull request when linking another pull request", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

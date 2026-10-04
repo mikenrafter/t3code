@@ -96,6 +96,28 @@ describe("V2 client presentation", () => {
     expect(shell.branchPullRequest).toEqual(branchPullRequest);
   });
 
+  it("carries the external status overlay and presents its absence as null", () => {
+    const externalStatus = {
+      source: "usagewindow",
+      key: "compacting",
+      text: "Compacting",
+      icon: "shrink",
+      color: "amber",
+      notifyUser: true,
+      expiresAt: "2099-09-22T12:00:00.000Z",
+      clearsOn: "work",
+      updatedAt: "2026-09-22T11:55:00.000Z",
+    } as const;
+
+    expect(
+      presentThreadShell(environmentId, { ...v2ThreadShell, externalStatus }).externalStatus,
+    ).toEqual(externalStatus);
+    expect(presentThreadShell(environmentId, v2ThreadShell).externalStatus).toBeNull();
+    expect(
+      presentThreadShell(environmentId, { ...v2ThreadShell, externalStatus: null }).externalStatus,
+    ).toBeNull();
+  });
+
   it("presents provider errors carried by failed thread shells", () => {
     const runId = RunId.make("run-failed");
     const shell = presentThreadShell(environmentId, {
