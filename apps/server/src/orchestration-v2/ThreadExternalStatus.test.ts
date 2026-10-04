@@ -225,32 +225,39 @@ const cases: ReadonlyArray<Case> = [
   ["custom:resume-complete", "run completing", ["running"], "completed", {}, false],
 ];
 
-for (const [name, layer] of layers) {
-  for (const [clearsOn, label, seed, event, options, cleared] of cases) {
-    it.effect(
-      `${name}: clearsOn ${String(clearsOn)} ${cleared ? "clears" : "keeps"} the overlay on ${label}`,
-      () =>
-        Effect.gen(function* () {
-          const threadId = yield* createThread(`matrix:${String(clearsOn)}:${label}`);
-          // Runs that already exist when the producer sets its status.
-          for (const [index, status] of seed.entries()) {
-            yield* writeRun(threadId, status, { created: index === 0 });
-          }
-          yield* writeStatus(threadId, externalStatus(clearsOn));
-          assert.deepEqual(yield* visibleStatus(threadId), externalStatus(clearsOn));
+const matrix = layers.flatMap(([name, layer]) =>
+  cases.map(([clearsOn, label, seed, event, options, cleared]) => ({
+    title: `${name}: clearsOn ${String(clearsOn)} ${cleared ? "clears" : "keeps"} the overlay on ${label}`,
+    layer,
+    clearsOn,
+    label,
+    seed,
+    event,
+    options,
+    cleared,
+  })),
+);
 
-          yield* writeRun(threadId, event, options);
+it.effect.each(matrix)("$title", ({ layer, clearsOn, label, seed, event, options, cleared }) =>
+  Effect.gen(function* () {
+    const threadId = yield* createThread(`matrix:${String(clearsOn)}:${label}`);
+    // Runs that already exist when the producer sets its status.
+    for (const [index, status] of seed.entries()) {
+      yield* writeRun(threadId, status, { created: index === 0 });
+    }
+    yield* writeStatus(threadId, externalStatus(clearsOn));
+    assert.deepEqual(yield* visibleStatus(threadId), externalStatus(clearsOn));
 
-          const after = yield* visibleStatus(threadId);
-          if (cleared) {
-            assert.isNull(after);
-          } else {
-            assert.deepEqual(after, externalStatus(clearsOn));
-          }
-        }).pipe(Effect.provide(layer)),
-    );
-  }
-}
+    yield* writeRun(threadId, event, options);
+
+    const after = yield* visibleStatus(threadId);
+    if (cleared) {
+      assert.isNull(after);
+    } else {
+      assert.deepEqual(after, externalStatus(clearsOn));
+    }
+  }).pipe(Effect.provide(layer)),
+);
 
 it.effect.each(layers)("%s: a later status replaces the one a transition cleared", ([, layer]) =>
   Effect.gen(function* () {
