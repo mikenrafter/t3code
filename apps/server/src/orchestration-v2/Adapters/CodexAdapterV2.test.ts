@@ -66,6 +66,7 @@ import {
   type ProviderAdapterV2TurnInput,
 } from "../ProviderAdapter.ts";
 import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
+import { migratedProviderThread } from "../legacy/LegacyV1ResumeBridge.testkit.ts";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import {
   makeReplayServerConfig,
@@ -7271,5 +7272,108 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.instanceOf(error, ProviderAdapterForkThreadError);
       assert.include(errorCauseChainText(error), "fork exploded");
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+});
+
+describe("CodexAdapterV2 migrated V1 native thread", () => {
+  const V1_NATIVE_THREAD_ID = "019e3f5a-v1-codex-native-thread";
+
+  it.effect("resumes the V1 thread id through thread/resume and never creates a thread", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-migrated-v1-resume";
+        // The transcript holds no thread/start: the replay rejects any frame it does not expect.
+        const handshake = codexReplayPreamble({
+          nativeThreadId: "unused",
+          nativeTurnId: "unused-turn",
+          prompt: "unused-prompt",
+        }).slice(0, 3);
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...handshake,
+            {
+              type: "expect_outbound",
+              label: "thread/resume",
+              frame: {
+                id: 2,
+                method: "thread/resume",
+                params: {
+                  threadId: V1_NATIVE_THREAD_ID,
+                  excludeTurns: true,
+                  config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "thread/resume",
+              frame: {
+                id: 2,
+                result: { thread: { id: V1_NATIVE_THREAD_ID, updatedAt: 1782622450 } },
+              },
+            },
+          ],
+        });
+        const fileSystem = yield* FileSystem.FileSystem;
+        const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
+          open: (openInput) =>
+            Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterOpenSessionError({
+                    driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+                    providerSessionId: openInput.providerSessionId,
+                    cause,
+                  }),
+              ),
+              Effect.flatMap((context) =>
+                Effect.service(CodexClient.CodexAppServerClient).pipe(
+                  Effect.map((client) => withCodexReplayChildMetadata(client, transcript)),
+                  Effect.provide(context),
+                ),
+              ),
+            ),
+        };
+        const adapter = CodexAdapterV2.makeCodexAdapterV2({
+          instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CODEX_SETTINGS,
+          environment: {},
+          clientFactory,
+          fileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* makeReplayServerConfig(scenario).pipe(Effect.orDie),
+          continuationRequests: { offer: () => Effect.void },
+        });
+        const threadId = ThreadId.make("thread-codex-migrated");
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-codex-migrated"),
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        });
+        const now = yield* DateTime.now;
+        const migrated = migratedProviderThread({
+          driver: "codex",
+          threadId,
+          nativeId: V1_NATIVE_THREAD_ID,
+          now,
+        });
+
+        const resumed = yield* runtime.resumeThread({
+          providerThread: migrated,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        });
+
+        assert.equal(resumed.id, migrated.id);
+        assert.deepStrictEqual(resumed.nativeThreadRef, {
+          driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+          nativeId: V1_NATIVE_THREAD_ID,
+          strength: "strong",
+        });
+        assert.equal(resumed.status, "idle");
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
   );
 });

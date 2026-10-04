@@ -66,6 +66,7 @@ import {
 } from "../ProviderAdapter.ts";
 import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
 import { makeProviderFailure } from "../ProviderFailure.ts";
+import { migratedProviderThread } from "../legacy/LegacyV1ResumeBridge.testkit.ts";
 import * as ClaudeAdapterV2 from "./ClaudeAdapterV2.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 
@@ -1866,6 +1867,247 @@ describe("ClaudeAdapterV2 native session identity", () => {
         assert.equal(openedQueries[0]?.options.resume, "native-session-identity");
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
       }),
+  );
+});
+
+describe("ClaudeAdapterV2 migrated V1 native session", () => {
+  const MIGRATED_THREAD_ID = ThreadId.make("thread-claude-migrated");
+  const V1_SESSION_UUID = "3f2b8c1e-7d4a-4e6b-9a5c-0d1e2f3a4b5c";
+
+  /** One Claude session runtime over a recording query runner. */
+  const makeMigratedSession = (
+    options: {
+      readonly queryMessages?: Stream.Stream<
+        SDKMessage,
+        ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError
+      >;
+      /** Fail the first open, as a failed `claude` start does. */
+      readonly failFirstOpen?: boolean;
+    } = {},
+  ) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-claude-v2-migrated-",
+      });
+      const openedQueries: Array<ClaudeAdapterV2.ClaudeAgentSdkQueryOpenInput> = [];
+      let allocatedSessionIds = 0;
+      const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
+        instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CLAUDE_SETTINGS,
+        environment: {},
+        attachmentsDir,
+        fileSystem,
+        path: yield* Path.Path,
+        idAllocator,
+        queryRunner: {
+          allocateSessionId: Effect.sync(() => {
+            allocatedSessionIds += 1;
+            return "native-session-fresh";
+          }),
+          open: (input) =>
+            Effect.suspend(() => {
+              openedQueries.push(input);
+              if (options.failFirstOpen === true && openedQueries.length === 1) {
+                return Effect.fail(
+                  new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                    method: "query.open",
+                    cause: "simulated failed start",
+                  }),
+                );
+              }
+              return Effect.succeed({
+                messages: options.queryMessages ?? Stream.empty,
+                offer: () => Effect.void,
+                setModel: () => Effect.void,
+                setPermissionMode: () => Effect.void,
+                interrupt: Effect.void,
+                close: Effect.void,
+              });
+            }),
+          forkSession: () => Effect.die("unused forkSession"),
+          subagentLaunchToolUseId: () => Effect.succeed(null),
+          assertComplete: Effect.void,
+        },
+      });
+      const runtime = yield* adapter.openSession({
+        threadId: MIGRATED_THREAD_ID,
+        providerSessionId: ProviderSessionId.make(
+          `provider-session-claude-migrated-${openedQueries.length}`,
+        ),
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+      });
+      const now = yield* DateTime.now;
+      const startTurn = (
+        providerThread: OrchestrationV2ProviderThread,
+        providerTurnOrdinal: number,
+      ) =>
+        runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: MIGRATED_THREAD_ID,
+            providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-claude-migrated-${providerTurnOrdinal}`),
+            text: "Continue where you left off.",
+            attachments: [],
+            providerTurnOrdinal,
+          }),
+        );
+      return {
+        adapter,
+        runtime,
+        openedQueries,
+        allocatedSessionIds: () => allocatedSessionIds,
+        startTurn,
+        now,
+      };
+    });
+
+  const provide = Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer));
+
+  it.effect("resumes the V1 session on the first provider turn of a migrated thread", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const session = yield* makeMigratedSession();
+        const migrated = migratedProviderThread({
+          driver: "claudeAgent",
+          threadId: MIGRATED_THREAD_ID,
+          nativeId: V1_SESSION_UUID,
+          now: session.now,
+        });
+
+        const resumed = yield* session.runtime.resumeThread({ providerThread: migrated });
+        assert.equal(resumed.nativeThreadRef?.nativeId, V1_SESSION_UUID);
+        assert.equal(resumed.id, migrated.id);
+        // The first migrated turn is provider-turn ordinal 1 with no conversation head.
+        yield* session.startTurn(resumed, 1);
+
+        assert.equal(session.openedQueries.length, 1);
+        const options = session.openedQueries[0]?.options;
+        assert.equal(options?.resume, V1_SESSION_UUID);
+        assert.isUndefined(options?.sessionId);
+        // The V1 cursor's `resumeSessionAt` is not a rewind boundary.
+        assert.isUndefined(options?.resumeSessionAt);
+        assert.equal(session.allocatedSessionIds(), 0);
+      }).pipe(provide),
+    ),
+  );
+
+  it.effect("rejects resuming a provider thread that has no native session id", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const session = yield* makeMigratedSession();
+        const migrated = migratedProviderThread({
+          driver: "claudeAgent",
+          threadId: MIGRATED_THREAD_ID,
+          nativeId: V1_SESSION_UUID,
+          now: session.now,
+        });
+
+        const error = yield* Effect.flip(
+          session.runtime.resumeThread({ providerThread: { ...migrated, nativeThreadRef: null } }),
+        );
+
+        assert.equal(error._tag, "ProviderAdapterResumeThreadError");
+      }).pipe(provide),
+    ),
+  );
+
+  it.effect("still creates the session on a fresh first turn and until a create succeeds", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const session = yield* makeMigratedSession({ failFirstOpen: true });
+        const providerThread = yield* session.runtime.ensureThread({
+          threadId: MIGRATED_THREAD_ID,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+
+        const failed = yield* Effect.exit(session.startTurn(providerThread, 1));
+        assert.isTrue(Exit.isFailure(failed));
+        yield* session.startTurn(providerThread, 1);
+
+        // A create that never opened must not be remembered as an existing session.
+        assert.equal(session.openedQueries.length, 2);
+        for (const opened of session.openedQueries) {
+          assert.equal(opened.options.sessionId, "native-session-fresh");
+          assert.isUndefined(opened.options.resume);
+        }
+      }).pipe(provide),
+    ),
+  );
+
+  it.effect(
+    "resumes the V1 session again after the provider session is released and reopened",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const first = yield* makeMigratedSession();
+          const migrated = migratedProviderThread({
+            driver: "claudeAgent",
+            threadId: MIGRATED_THREAD_ID,
+            nativeId: V1_SESSION_UUID,
+            now: first.now,
+          });
+          yield* first.startTurn(
+            yield* first.runtime.resumeThread({ providerThread: migrated }),
+            1,
+          );
+
+          // A new session instance has lost its in-memory set of opened sessions; the first
+          // migrated turn has completed, so the next one is provider-turn ordinal 2.
+          const reopened = yield* makeMigratedSession();
+          yield* reopened.startTurn(
+            yield* reopened.runtime.resumeThread({ providerThread: migrated }),
+            2,
+          );
+
+          assert.equal(reopened.openedQueries[0]?.options.resume, V1_SESSION_UUID);
+          assert.isUndefined(reopened.openedQueries[0]?.options.sessionId);
+        }).pipe(provide),
+      ),
+  );
+
+  it.effect(
+    "fails the run once and never resends when the resumed query fails after it opened",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* makeMigratedSession({
+            queryMessages: Stream.fail(
+              new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                method: "fromAsyncIterable",
+                cause: "No conversation found with session ID",
+              }),
+            ),
+          });
+          const migrated = migratedProviderThread({
+            driver: "claudeAgent",
+            threadId: MIGRATED_THREAD_ID,
+            nativeId: V1_SESSION_UUID,
+            now: session.now,
+          });
+          const resumed = yield* session.runtime.resumeThread({ providerThread: migrated });
+          const terminal = yield* session.runtime.events.pipe(
+            Stream.filter(
+              (event): event is Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> =>
+                event.type === "turn.terminal",
+            ),
+            Stream.runHead,
+            Effect.forkScoped,
+          );
+
+          yield* session.startTurn(resumed, 1);
+          const settled = yield* Fiber.join(terminal);
+
+          assert.equal(Option.getOrUndefined(settled)?.status, "failed");
+          // The provider may already have acted: the adapter does not try the prompt again.
+          assert.equal(session.openedQueries.length, 1);
+          assert.equal(session.openedQueries[0]?.options.resume, V1_SESSION_UUID);
+        }).pipe(provide),
+      ),
   );
 });
 

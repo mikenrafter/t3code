@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../../config.ts";
+import { migratedProviderThread } from "../legacy/LegacyV1ResumeBridge.testkit.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
@@ -1015,4 +1016,149 @@ describe("CursorAdapterV2", () => {
       },
     );
   });
+});
+
+describe("CursorAdapterV2 migrated V1 native session", () => {
+  const V1_SESSION_ID = "0b9d4a52-6c7e-4f18-a3b2-5d6e7f8091a2";
+
+  it.effect("resumes the V1 session id through the SDK and never creates an agent", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "cursor-v2-migrated-",
+      });
+      const opened: Array<{ readonly operation: string; readonly agentId: string | undefined }> =
+        [];
+      const sent: Array<string> = [];
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-migrated-thread");
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: workspace,
+      });
+      const adapter = makeCursorAdapterV2({
+        instanceId,
+        settings: yield* decodeCursorSettings({}),
+        environment: { HOME: workspace },
+        fileSystem,
+        path,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        serverConfig: yield* ServerConfig.ServerConfig.pipe(
+          Effect.provide(
+            ServerConfig.layerTest(workspace, { prefix: "cursor-v2-migrated-config-" }),
+          ),
+        ),
+        runner: {
+          assertComplete: Effect.void,
+          open: (input) =>
+            Effect.sync(() => {
+              opened.push({ operation: input.operation, agentId: input.agentId });
+              const agentId = input.agentId ?? "agent-created-by-mistake";
+              return {
+                agentId,
+                listMessages: Effect.succeed([]),
+                close: Effect.void,
+                send: (sendInput) =>
+                  Effect.sync(() => {
+                    sent.push(
+                      typeof sendInput.message === "string"
+                        ? sendInput.message
+                        : sendInput.message.text,
+                    );
+                    return {
+                      agentId,
+                      runId: "native-run-migrated",
+                      wait: Effect.succeed({
+                        id: "native-run-migrated",
+                        requestId: "native-request-migrated",
+                        status: "finished" as const,
+                        model: { id: "composer-2.5" },
+                        durationMs: 1,
+                      }),
+                      cancel: Effect.void,
+                    };
+                  }),
+              };
+            }),
+        },
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("cursor-migrated-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      const migrated = migratedProviderThread({
+        driver: "cursor",
+        threadId,
+        nativeId: V1_SESSION_ID,
+        now,
+      });
+
+      const resumed = yield* runtime.resumeThread({ providerThread: migrated });
+      yield* runtime.startTurn({
+        threadId,
+        providerThread: resumed,
+        modelSelection,
+        runtimePolicy,
+        runId: RunId.make("cursor-migrated-run"),
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: RunAttemptId.make("cursor-migrated-attempt"),
+        rootNodeId: NodeId.make("cursor-migrated-root"),
+        appThread: {
+          id: threadId,
+          projectId: ProjectId.make("cursor-migrated-project"),
+          createdBy: "user",
+          creationSource: "web",
+          title: "Cursor migrated",
+          providerInstanceId: instanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: resumed.id,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+        message: {
+          messageId: MessageId.make("cursor-migrated-message"),
+          createdBy: "agent",
+          creationSource: "server",
+          text: "Continue where you left off.",
+          attachments: [],
+        },
+      });
+      const terminal = yield* runtime.events.pipe(
+        Stream.filter((event) => event.type === "turn.terminal"),
+        Stream.runHead,
+      );
+
+      assert.equal(resumed.nativeThreadRef?.nativeId, V1_SESSION_ID);
+      assert.equal(resumed.id, migrated.id);
+      // Exactly one open, a resume of the V1 id: the turn reuses it instead of creating anew.
+      assert.deepStrictEqual(opened, [{ operation: "resume", agentId: V1_SESSION_ID }]);
+      assert.lengthOf(sent, 1);
+      assert.isTrue(sent[0]?.startsWith("Continue where you left off."));
+      assert.equal(Option.getOrUndefined(terminal)?.status, "completed");
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
+  );
+
+  // Needs a Cursor session written by V1's ACP client. Anything we could build here
+  // without a real user session would only prove our own guess about its on-disk shape.
+  it.todo(
+    "resumes a sanitized V1 ACP session through the installed Cursor SDK (no fixture without real user data)",
+  );
 });

@@ -2,6 +2,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  CommandId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -32,6 +33,16 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import {
+  bindNativeThreadManually,
+  makeBridgeStack,
+  makeFakeAdapterLog,
+  makeFakeProviderAdapter,
+  seedV1Thread,
+  settleCompletedRuns,
+} from "./legacy/LegacyV1ResumeBridge.testkit.ts";
+import * as Orchestrator from "./Orchestrator.ts";
 import { ProviderAdapterEventStreamError } from "./ProviderAdapter.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
@@ -853,5 +864,70 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
           },
         ]);
       }),
+  );
+}
+
+// A migrated V1 thread resumes its V1 session; when the provider cannot, the thread falls back to a
+// fresh native session and the portable history, which already includes the runless V1 messages.
+for (const driver of ["codex", "cursor"] as const) {
+  effectIt.live(
+    `replaces a ${driver} V1 session that cannot be resumed with one fresh binding and one portable handoff`,
+    () => {
+      const threadId = `thread:resume-fallback:${driver}`;
+      const log = makeFakeAdapterLog();
+      const adapter = makeFakeProviderAdapter({ driver, log, resume: "fail" });
+      return Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+        yield* seedV1Thread({
+          threadId,
+          modelSelection: { instanceId: driver, model: "gpt-5.4" },
+          messageCount: 4,
+        });
+        yield* importer.reconcileShells;
+        yield* importer.ensureTranscript(ThreadId.make(threadId));
+        yield* bindNativeThreadManually({ threadId, driver, nativeId: "native-gone-from-disk" });
+
+        yield* settleCompletedRuns(
+          1,
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`command:${threadId}`),
+            threadId: ThreadId.make(threadId),
+            messageId: MessageId.make(`message:${threadId}`),
+            text: "carry on",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          }),
+        );
+
+        // The V1 session was tried once, then one fresh session replaced it.
+        expect(log.resumedNativeIds).toEqual(["native-gone-from-disk"]);
+        expect(log.ensuredThreads).toEqual([threadId]);
+        const projection = yield* orchestrator.getThreadProjection(ThreadId.make(threadId));
+        expect(projection.providerThreads).toHaveLength(1);
+        expect(projection.providerThreads[0]?.id).toBe(`provider-thread:migration:v1:${threadId}`);
+        expect(projection.providerThreads[0]?.nativeThreadRef?.nativeId).toBe(
+          `${driver}:fresh:${threadId}`,
+        );
+        // Exactly the fallback handoff: no second, legacy-import handoff stacked on top of it.
+        expect(projection.contextHandoffs).toHaveLength(1);
+        const handoff = projection.contextHandoffs[0]!;
+        expect(handoff.strategy).toBe("full_thread_summary");
+        for (const index of [1, 2, 3, 4]) {
+          expect(handoff.summaryText).toContain(`V1 history ${index} of ${threadId}`);
+        }
+        expect(log.turns).toHaveLength(1);
+        expect(log.turns[0]?.nativeId).toBe(`${driver}:fresh:${threadId}`);
+        expect(log.turns[0]?.text).toContain("V1 history 1 of");
+        expect(log.turns[0]?.text).toContain("carry on");
+      }).pipe(
+        Effect.provide(
+          makeBridgeStack({ name: `resume-fallback-${driver}`, adapters: [{ adapter }] }),
+        ),
+      );
+    },
   );
 }

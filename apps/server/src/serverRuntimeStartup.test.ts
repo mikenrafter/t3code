@@ -11,6 +11,18 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
 
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+
+import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
+import {
+  awaitMilestone,
+  countRuns,
+  makeBridgeStack,
+  makeFakeAdapterLog,
+  makeFakeProviderAdapter,
+  seedV1Thread,
+  v1Cursors,
+} from "./orchestration-v2/legacy/LegacyV1ResumeBridge.testkit.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 
 import * as ServerConfig from "./config.ts";
@@ -193,4 +205,171 @@ it.effect("automatic pull only updates enabled, behind, clean default-branch che
     ).pipe(Effect.provideService(GitVcsDriver.GitVcsDriver, git));
     assert.deepStrictEqual(pulled, ["/inherited"]);
   }),
+);
+
+// Loaded where it is used so this file's other tests do not depend on the module.
+const loadBridge = Effect.promise(
+  () => import("./orchestration-v2/legacy/LegacyV1ResumeBridge.ts"),
+);
+
+const startupError = new ServerRuntimeStartup.ServerRuntimeStartupError({
+  mode: "web",
+  host: "127.0.0.1",
+  port: 3773,
+  cause: new Error("test startup failure"),
+});
+
+it.effect("continues V1 threads only after command readiness, without delaying it", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const gate = yield* ServerRuntimeStartup.makeCommandGate;
+      const started = yield* Deferred.make<void>();
+      const providerHeld = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+
+      // `continuePending` stands in for a bridge pass stuck behind a slow provider.
+      yield* ServerRuntimeStartup.startLegacyV1Continuation({
+        awaitCommandReady: gate.awaitCommandReady,
+        continuePending: Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(providerHeld)),
+          Effect.andThen(Deferred.succeed(finished, undefined)),
+        ),
+      });
+      yield* Effect.yieldNow;
+      assert.isFalse(yield* Deferred.isDone(started));
+
+      yield* gate.signalCommandReady;
+      yield* awaitMilestone(started, "the continuation pass to start once commands are ready");
+
+      // The held provider cannot hold up commands: readiness was signalled without it.
+      assert.equal(yield* gate.enqueueCommand(Effect.succeed("served")), "served");
+      assert.isFalse(yield* Deferred.isDone(finished));
+
+      yield* Deferred.succeed(providerHeld, undefined);
+      yield* awaitMilestone(finished, "the continuation pass to finish");
+    }),
+  ),
+);
+
+it.effect("never continues V1 threads when startup fails before command readiness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const gate = yield* ServerRuntimeStartup.makeCommandGate;
+      const started = yield* Deferred.make<void>();
+      yield* ServerRuntimeStartup.startLegacyV1Continuation({
+        awaitCommandReady: gate.awaitCommandReady,
+        continuePending: Deferred.succeed(started, undefined),
+      });
+
+      yield* gate.failCommandReady(startupError);
+      for (let turn = 0; turn < 5; turn += 1) yield* Effect.yieldNow;
+
+      assert.isFalse(yield* Deferred.isDone(started));
+    }),
+  ),
+);
+
+it.effect("keeps startup alive when a continuation pass dies", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const gate = yield* ServerRuntimeStartup.makeCommandGate;
+      const started = yield* Deferred.make<void>();
+      yield* ServerRuntimeStartup.startLegacyV1Continuation({
+        awaitCommandReady: gate.awaitCommandReady,
+        continuePending: Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Effect.die(new Error("continuation exploded"))),
+        ),
+      });
+
+      yield* gate.signalCommandReady;
+      yield* awaitMilestone(started, "the continuation pass to start");
+
+      assert.equal(yield* gate.enqueueCommand(Effect.succeed("still serving")), "still serving");
+    }),
+  ),
+);
+
+it.live(
+  "binds hundreds of V1 shells without opening providers or reading transcripts for the ineligible",
+  () => {
+    const threadCount = 340;
+    const runningEvery = 100;
+    const log = makeFakeAdapterLog();
+    const adapter = makeFakeProviderAdapter({ driver: "codex", log });
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const running: Array<string> = [];
+      for (let index = 0; index < threadCount; index += 1) {
+        const threadId = `thread:scale:${String(index).padStart(3, "0")}`;
+        const isRunning = index % runningEvery === 0;
+        if (isRunning) running.push(threadId);
+        yield* seedV1Thread({
+          threadId,
+          messageCount: 2,
+          runtime: {
+            providerName: "codex",
+            providerInstanceId: "codex",
+            cursor: v1Cursors.codex(`native:${threadId}`),
+          },
+          sessionStatus: isRunning ? "running" : index % 2 === 0 ? "ready" : "stopped",
+        });
+      }
+
+      // Binding happens with the shell import, before recovery and before any provider exists.
+      const summary = yield* importer.reconcileShells;
+      assert.equal(summary.importedThreadCount, threadCount);
+      const bound = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM fork_v1_resume_bridge WHERE binding_status = 'bound'
+      `;
+      assert.equal(bound[0]?.count, threadCount);
+      const pending = yield* sql<{ readonly thread_id: string }>`
+        SELECT thread_id FROM fork_v1_resume_bridge
+        WHERE continuation_status = 'pending' ORDER BY thread_id
+      `;
+      assert.deepStrictEqual(
+        pending.map((row) => row.thread_id),
+        running,
+      );
+      assert.equal(log.openedSessions, 0);
+
+      const hydrated: Array<string> = [];
+      const countingImporter = {
+        ...importer,
+        ensureTranscript: (threadId: Parameters<typeof importer.ensureTranscript>[0]) =>
+          Effect.sync(() => hydrated.push(threadId)).pipe(
+            Effect.andThen(importer.ensureTranscript(threadId)),
+          ),
+      } satisfies typeof importer;
+      const bridge = yield* (yield* loadBridge).make.pipe(
+        Effect.provideService(LegacyV1ThreadImporter.LegacyV1ThreadImporter, countingImporter),
+      );
+
+      yield* bridge.continuePending;
+
+      // Only the eligible threads are read in full, and dispatching never opens a provider:
+      // that waits for the effect worker, so startup readiness cannot depend on native resume.
+      assert.deepStrictEqual(hydrated.toSorted(), running);
+      for (const threadId of running) {
+        assert.equal(yield* countRuns(threadId), 1, threadId);
+      }
+      assert.equal(log.openedSessions, 0);
+      assert.isEmpty(log.turns);
+      const unhydrated = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM orchestration_v2_legacy_imports
+        WHERE transcript_imported_at IS NULL
+      `;
+      assert.equal(unhydrated[0]?.count, threadCount - running.length);
+    }).pipe(
+      Effect.provide(
+        makeBridgeStack({
+          name: "startup-scale",
+          adapters: [{ adapter }],
+          settings: { continueThreadsAfterServerUpdate: true },
+          runEffectWorker: false,
+        }),
+      ),
+    );
+  },
+  60_000,
 );

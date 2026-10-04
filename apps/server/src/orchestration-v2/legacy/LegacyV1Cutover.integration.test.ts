@@ -28,6 +28,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../../persistence/Migrations.ts";
 import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
+import { layer as providerSessionRuntimeLayer } from "../../persistence/ProviderSessionRuntime.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import Migration0042 from "../../persistence/Migrations/042_ProjectionThreadLinkedPullRequest.ts";
 import Migration0043 from "../../persistence/Migrations/043_ProjectionThreadsUnsettledAt.ts";
 import Migration0044 from "../../persistence/Migrations/044_ClearAutomaticProjectModelDefaults.ts";
@@ -41,6 +43,16 @@ import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
+import {
+  countRuns,
+  makeRegistryLayer,
+  readBridgeRow,
+  readReceiptStatus,
+  settleCompletedRuns,
+  toJson,
+} from "./LegacyV1ResumeBridge.testkit.ts";
+import * as CommandReceiptStore from "../CommandReceiptStore.ts";
+import * as ProjectStore from "../ProjectStore.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
@@ -419,12 +431,17 @@ interface CapturedTurn {
   readonly threadId: ThreadId;
   readonly providerThreadId: ProviderThreadId;
   readonly text: string;
+  readonly nativeId?: string | null;
 }
 
 const unimplemented = (detail: string) =>
   Effect.fail(new ProviderAdapterProtocolError({ driver, detail }));
 
-const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =>
+const makeCodexAdapter = (
+  capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>,
+  /** Native ids the orchestrator asked this adapter to resume, in order. */
+  resumedNativeIds?: Ref.Ref<ReadonlyArray<string | null>>,
+) =>
   ({
     instanceId,
     driver,
@@ -478,7 +495,14 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
                 updatedAt: createdAt,
               } satisfies OrchestrationV2ProviderThread;
             }),
-          resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+          resumeThread: ({ providerThread }) =>
+            (resumedNativeIds === undefined
+              ? Effect.void
+              : Ref.update(resumedNativeIds, (ids) => [
+                  ...ids,
+                  providerThread.nativeThreadRef?.nativeId ?? null,
+                ])
+            ).pipe(Effect.as(providerThread)),
           startTurn: (turnInput) =>
             Effect.gen(function* () {
               yield* Ref.update(capturedTurns, (turns) => [
@@ -487,6 +511,7 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
                   threadId: turnInput.threadId,
                   providerThreadId: turnInput.providerThread.id,
                   text: turnInput.message.text,
+                  nativeId: turnInput.providerThread.nativeThreadRef?.nativeId ?? null,
                 },
               ]);
               const eventTime = yield* DateTime.now;
@@ -584,16 +609,20 @@ const makeBootLayer = (input: {
   readonly dbPath: string;
   readonly workspace: string;
   readonly capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>;
+  readonly resumedNativeIds?: Ref.Ref<ReadonlyArray<string | null>>;
+  /** Server setting the bridge reads; defaults to the production default (off). */
+  readonly continueThreadsAfterServerUpdate?: boolean;
 }) => {
   const databaseLayer = makeSqlitePersistenceLive(input.dbPath).pipe(
     Layer.provide(NodeServices.layer),
   );
+  const runtimeRepositoryProvided = providerSessionRuntimeLayer.pipe(Layer.provide(databaseLayer));
   const eventStoreProvided = EventStore.layer.pipe(Layer.provideMerge(databaseLayer));
   const projectionStoreProvided = ProjectionStore.layer.pipe(Layer.provideMerge(databaseLayer));
   const storesProvided = Layer.mergeAll(databaseLayer, eventStoreProvided, projectionStoreProvided);
   const eventSinkProvided = EventSink.layer.pipe(Layer.provide(storesProvided));
   const importerProvided = LegacyV1ThreadImporter.layer.pipe(
-    Layer.provide(Layer.mergeAll(storesProvided, eventSinkProvided)),
+    Layer.provide(Layer.mergeAll(storesProvided, eventSinkProvided, runtimeRepositoryProvided)),
   );
   const maintenanceProvided = ProjectionMaintenance.layer.pipe(Layer.provide(storesProvided));
   const orchestratorProvided = makeOrchestratorV2ReplayLayerWithRegistry(
@@ -609,7 +638,9 @@ const makeBootLayer = (input: {
         },
       },
     },
-    ProviderAdapterRegistry.makeSingleLayer(makeCodexAdapter(input.capturedTurns)),
+    ProviderAdapterRegistry.makeSingleLayer(
+      makeCodexAdapter(input.capturedTurns, input.resumedNativeIds),
+    ),
     { databaseLayer },
   );
   return Layer.mergeAll(
@@ -618,6 +649,14 @@ const makeBootLayer = (input: {
     importerProvided,
     maintenanceProvided,
     orchestratorProvided,
+    // What the V1 resume bridge reads, so a test can start one over this boot.
+    runtimeRepositoryProvided,
+    makeRegistryLayer([{ adapter: makeCodexAdapter(input.capturedTurns, input.resumedNativeIds) }]),
+    ProjectStore.layer.pipe(Layer.provide(databaseLayer)),
+    CommandReceiptStore.layer.pipe(Layer.provide(databaseLayer)),
+    ServerSettings.layerTest({
+      continueThreadsAfterServerUpdate: input.continueThreadsAfterServerUpdate ?? false,
+    }).pipe(Layer.orDie),
   );
 };
 
@@ -1041,5 +1080,276 @@ describe("orchestration v2 legacy v1 cutover", () => {
           );
         }).pipe(Effect.provide(NodeServices.layer)),
       ),
+  );
+});
+
+/**
+ * V1 provider-session rows for the cutover threads, as V1 wrote them:
+ * a Codex session per thread, and the session status V1 last recorded.
+ */
+const seedV1ResumeRows = (fixturePath: string) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`PRAGMA journal_mode = WAL;`;
+      const rows = [
+        [ACTIVE_THREAD, "native-active", "running"],
+        [LONG_THREAD, "native-long", "ready"],
+        [PINNED_THREAD, "native-pinned", "stopped"],
+        [ARCHIVED_THREAD, "native-archived", "running"],
+        [DELETED_THREAD, "native-deleted", "running"],
+      ] as const;
+      for (const [threadId, nativeId, sessionStatus] of rows) {
+        yield* sql`
+          INSERT INTO provider_session_runtime (
+            thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status,
+            last_seen_at, resume_cursor_json, runtime_payload_json
+          ) VALUES (
+            ${threadId}, 'codex', NULL, 'codex', 'full-access', 'running',
+            '2026-01-09T12:00:00.000Z', ${toJson({ threadId: nativeId })},
+            '{"cwd":"/tmp/cutover"}'
+          )
+        `;
+        yield* sql`
+          INSERT INTO projection_thread_sessions (
+            thread_id, status, provider_name, provider_session_id, provider_thread_id,
+            active_turn_id, last_error, updated_at
+          ) VALUES (${threadId}, ${sessionStatus}, 'codex', NULL, NULL, NULL, NULL,
+            '2026-01-09T12:00:00.000Z')
+        `;
+      }
+      yield* sql`PRAGMA wal_checkpoint(TRUNCATE);`;
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: fixturePath }))),
+  );
+
+// Loaded where it is used so the original cutover test does not depend on the module.
+const loadBridge = Effect.promise(() => import("./LegacyV1ResumeBridge.ts"));
+
+const BRIDGE_PROMPT = "Continue where you left off.";
+
+const prepareCutoverCopy = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const workspace = yield* checkpointWorkspace("legacy-v1-resume-bridge");
+  const stateDir = yield* fs.makeTempDirectory({ prefix: "t3-v1-bridge-state-" });
+  const fixturePath = path.join(stateDir, "v1-source.sqlite");
+  const copyPath = path.join(stateDir, "userdata", "state.sqlite");
+  yield* fs.makeDirectory(path.join(stateDir, "userdata"), { recursive: true });
+  yield* seedV1Database(fixturePath, workspace);
+  yield* seedV1ResumeRows(fixturePath);
+  yield* fs.copyFile(fixturePath, copyPath);
+  return { workspace, copyPath };
+});
+
+const userDispatch = (threadId: string, label: string, text: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      createdBy: "user",
+      creationSource: "web",
+      commandId: CommandId.make(`command:cutover-bridge:${label}`),
+      threadId: ThreadId.make(threadId),
+      messageId: MessageId.make(`message:cutover-bridge:${label}`),
+      text,
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+    });
+  });
+
+describe("orchestration v2 legacy v1 resume bridge cutover", () => {
+  it.live(
+    "binds V1 sessions at the first boot, prompts running threads once across restarts, and resumes natively",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { workspace, copyPath } = yield* prepareCutoverCopy;
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const resumedNativeIds = yield* Ref.make<ReadonlyArray<string | null>>([]);
+          const bindingOf = (threadId: string) =>
+            ProviderThreadId.make(`provider-thread:migration:v1:${threadId}`);
+          const bootLayer = (name: string) =>
+            makeBootLayer({
+              name,
+              dbPath: copyPath,
+              workspace,
+              capturedTurns,
+              resumedNativeIds,
+              continueThreadsAfterServerUpdate: true,
+            });
+
+          // First boot: shells bind natively, and only the running thread is prompted.
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+              const projections = yield* ProjectionStore.ProjectionStoreV2;
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              yield* importer.reconcileShells;
+
+              const bound = [
+                [ACTIVE_THREAD, "native-active"],
+                [LONG_THREAD, "native-long"],
+                [PINNED_THREAD, "native-pinned"],
+                [ARCHIVED_THREAD, "native-archived"],
+              ] as const;
+              for (const [threadId, nativeId] of bound) {
+                const shell = yield* projections.getThreadProjection(ThreadId.make(threadId));
+                assert.equal(shell.thread.activeProviderThreadId, bindingOf(threadId));
+                assert.equal(shell.providerThreads[0]?.nativeThreadRef?.nativeId, nativeId);
+                assert.equal(shell.providerThreads[0]?.nativeThreadRef?.strength, "strong");
+              }
+              // No V1 session, no binding: these keep the 32k handoff path.
+              const unbound = yield* projections.getThreadProjection(
+                ThreadId.make(INTERRUPTED_THREAD),
+              );
+              assert.isNull(unbound.thread.activeProviderThreadId);
+
+              const bridge = yield* (yield* loadBridge).make;
+              yield* settleCompletedRuns(1, bridge.continuePending);
+
+              const prompted = yield* Ref.get(capturedTurns);
+              assert.deepStrictEqual(
+                prompted.map((turn) => [turn.threadId, turn.nativeId, turn.text]),
+                [[ACTIVE_THREAD, "native-active", BRIDGE_PROMPT]],
+              );
+              assert.deepStrictEqual(yield* Ref.get(resumedNativeIds), ["native-active"]);
+              const active = yield* orchestrator.getThreadProjection(ThreadId.make(ACTIVE_THREAD));
+              assert.isEmpty(active.contextHandoffs);
+              assert.equal(active.runs.length, 1);
+              assert.equal(
+                yield* readReceiptStatus(`command:migration:v1:continue:${ACTIVE_THREAD}`),
+                "accepted",
+              );
+              assert.equal((yield* readBridgeRow(ACTIVE_THREAD))?.continuation_status, "submitted");
+              for (const threadId of [
+                LONG_THREAD,
+                PINNED_THREAD,
+                ARCHIVED_THREAD,
+                DELETED_THREAD,
+              ]) {
+                assert.equal((yield* readBridgeRow(threadId))?.continuation_status, "skipped");
+                assert.equal(yield* countRuns(threadId), 0);
+              }
+
+              // A manual first turn on a V1 `ready` or `stopped` thread resumes its session,
+              // without replaying the transcript into the prompt.
+              const importerAgain = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+              for (const [threadId, label] of [
+                [LONG_THREAD, "long"],
+                [PINNED_THREAD, "pinned"],
+              ] as const) {
+                yield* importerAgain.ensureTranscript(ThreadId.make(threadId));
+                yield* settleCompletedRuns(1, userDispatch(threadId, label, CONTINUATION_PROMPT));
+                const continued = yield* orchestrator.getThreadProjection(ThreadId.make(threadId));
+                assert.isEmpty(continued.contextHandoffs, threadId);
+              }
+              const turns = yield* Ref.get(capturedTurns);
+              assert.deepStrictEqual(
+                turns.slice(1).map((turn) => [turn.threadId, turn.nativeId, turn.text]),
+                [
+                  [LONG_THREAD, "native-long", CONTINUATION_PROMPT],
+                  [PINNED_THREAD, "native-pinned", CONTINUATION_PROMPT],
+                ],
+              );
+              assert.deepStrictEqual(yield* Ref.get(resumedNativeIds), [
+                "native-active",
+                "native-long",
+                "native-pinned",
+              ]);
+              yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+            }).pipe(Effect.provide(bootLayer("legacy-v1-resume-bridge-first"))),
+          );
+
+          // Restart: the same file, a new process. Nothing is prompted twice and the
+          // native identity survives.
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+              const projections = yield* ProjectionStore.ProjectionStoreV2;
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const turnsBefore = (yield* Ref.get(capturedTurns)).length;
+
+              assert.deepStrictEqual(yield* importer.reconcileShells, {
+                importedThreadCount: 0,
+                importedMessageCount: 0,
+              });
+              const bridge = yield* (yield* loadBridge).make;
+              yield* bridge.continuePending;
+
+              assert.equal((yield* Ref.get(capturedTurns)).length, turnsBefore);
+              assert.equal(yield* countRuns(ACTIVE_THREAD), 1);
+              assert.equal((yield* readBridgeRow(ACTIVE_THREAD))?.continuation_status, "submitted");
+              const active = yield* projections.getThreadProjection(ThreadId.make(ACTIVE_THREAD));
+              assert.equal(active.thread.activeProviderThreadId, bindingOf(ACTIVE_THREAD));
+              assert.equal(active.providerThreads[0]?.nativeThreadRef?.nativeId, "native-active");
+
+              // The next turn after a restart resumes the same V1 session again.
+              yield* settleCompletedRuns(1, userDispatch(ACTIVE_THREAD, "after-restart", "Next."));
+              const resumed = yield* Ref.get(resumedNativeIds);
+              assert.equal(resumed.at(-1), "native-active");
+              const turns = yield* Ref.get(capturedTurns);
+              assert.equal(turns.at(-1)?.text, "Next.");
+              assert.equal(turns.at(-1)?.nativeId, "native-active");
+              assert.isEmpty(
+                (yield* orchestrator.getThreadProjection(ThreadId.make(ACTIVE_THREAD)))
+                  .contextHandoffs,
+              );
+            }).pipe(Effect.provide(bootLayer("legacy-v1-resume-bridge-restart"))),
+          );
+        }).pipe(Effect.provide(NodeServices.layer)),
+      ),
+  );
+
+  it.live("binds natively but prompts nothing while the update-continuation setting is off", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { workspace, copyPath } = yield* prepareCutoverCopy;
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const resumedNativeIds = yield* Ref.make<ReadonlyArray<string | null>>([]);
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+            const projections = yield* ProjectionStore.ProjectionStoreV2;
+            yield* importer.reconcileShells;
+            const bridge = yield* (yield* loadBridge).make;
+
+            yield* bridge.continuePending;
+
+            assert.deepStrictEqual(yield* Ref.get(capturedTurns), []);
+            assert.equal(yield* countRuns(ACTIVE_THREAD), 0);
+            assert.equal((yield* readBridgeRow(ACTIVE_THREAD))?.continuation_status, "skipped");
+            // The binding is still there for the user's own next message.
+            const active = yield* projections.getThreadProjection(ThreadId.make(ACTIVE_THREAD));
+            assert.equal(active.providerThreads[0]?.nativeThreadRef?.nativeId, "native-active");
+            yield* importer.ensureTranscript(ThreadId.make(ACTIVE_THREAD));
+            yield* settleCompletedRuns(
+              1,
+              userDispatch(ACTIVE_THREAD, "manual", CONTINUATION_PROMPT),
+            );
+            assert.deepStrictEqual(yield* Ref.get(resumedNativeIds), ["native-active"]);
+            assert.equal((yield* Ref.get(capturedTurns))[0]?.text, CONTINUATION_PROMPT);
+          }).pipe(
+            Effect.provide(
+              makeBootLayer({
+                name: "legacy-v1-resume-bridge-off",
+                dbPath: copyPath,
+                workspace,
+                capturedTurns,
+                resumedNativeIds,
+              }),
+            ),
+          ),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
+  );
+
+  // Restarting while the bridge's own continuation is mid-turn should be handled by the
+  // existing restart recovery and its `command:restart-continuation:*` commands. Proving it
+  // needs a crash fixture whose recovery and continuation can be awaited; the recovery runs
+  // inside the layer build, so a test could only observe it by polling.
+  it.todo(
+    "a restart during the bridge continuation follows existing restart recovery (needs an awaitable recovery milestone)",
   );
 });
