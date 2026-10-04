@@ -2986,6 +2986,10 @@ export function makeClaudeAdapterV2(
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
+        // Native session ids this session instance knows exist: created by a
+        // successful first query, forked, or explicitly resumed by
+        // `resumeThread` (a migrated V1 session has no provider turn here yet).
+        // Membership makes the next query resume instead of create.
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         const planIdsByNativeItem = yield* Ref.make(
@@ -7489,6 +7493,18 @@ export function makeClaudeAdapterV2(
           ),
           resumeThread: Effect.fn("ClaudeAdapterV2.resumeThread")(
             function* (threadInput: { readonly providerThread: OrchestrationV2ProviderThread }) {
+              const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              // The session already exists, so the first query must resume it.
+              // Without a prior provider turn it would otherwise create a
+              // session under this id, which the CLI rejects as already in use.
+              yield* Ref.update(openedNativeThreads, (current) => {
+                if (current.has(nativeThreadId)) {
+                  return current;
+                }
+                const updated = new Set(current);
+                updated.add(nativeThreadId);
+                return updated;
+              });
               const updatedAt = yield* DateTime.now;
               return {
                 ...threadInput.providerThread,
