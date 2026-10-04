@@ -67,13 +67,20 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import {
+  AgentSessionAttachDeletedThreadError,
+  AgentSessionAttachInput,
+  AgentSessionAttachResult,
+  AgentSessionImportBlockedError,
   AgentSessionImportInput,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
   AgentSessionImportResult,
+  AgentSessionListInput,
+  AgentSessionListResult,
   AgentSessionScanInput,
   AgentSessionScanResult,
   AgentSessionScanError,
+  AgentSessionUnavailableError,
 } from "./agentSessions.ts";
 import {
   AssetAccessError,
@@ -357,6 +364,8 @@ export const WS_METHODS = {
   filesystemBrowse: "filesystem.browse",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+  agentSessionsList: "agentSessions.list",
+  agentSessionsAttach: "agentSessions.attach",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1200,6 +1209,31 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   ]),
 });
 
+const WsAgentSessionsListRpc = Rpc.make(WS_METHODS.agentSessionsList, {
+  payload: AgentSessionListInput,
+  success: AgentSessionListResult,
+  error: Schema.Union([
+    AgentSessionImportProjectChangedError,
+    AgentSessionImportProjectNotFoundError,
+    AgentSessionScanError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
+const WsAgentSessionsAttachRpc = Rpc.make(WS_METHODS.agentSessionsAttach, {
+  payload: AgentSessionAttachInput,
+  success: AgentSessionAttachResult,
+  error: Schema.Union([
+    AgentSessionAttachDeletedThreadError,
+    AgentSessionImportBlockedError,
+    AgentSessionUnavailableError,
+    AgentSessionImportProjectChangedError,
+    AgentSessionImportProjectNotFoundError,
+    AgentSessionScanError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
 const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
@@ -1800,6 +1834,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsFilesystemBrowseRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
+  WsAgentSessionsListRpc,
+  WsAgentSessionsAttachRpc,
   WsAssetsCreateUrlRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,

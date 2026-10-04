@@ -1,9 +1,16 @@
 import * as Schema from "effect/Schema";
-import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  PositiveInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 /** Coding agent home directories the scanner knows how to read. */
-export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex"]);
+export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex", "cursor"]);
 export type AgentSessionSource = typeof AgentSessionSource.Type;
 
 /** File identity saved with an imported session so bounded retries can skip unchanged history. */
@@ -98,10 +105,146 @@ export const AgentSessionImportResult = Schema.Struct({
 });
 export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
 
+/** How much pre-compaction history to retain when attaching a session. */
+export const AgentSessionHistoryMode = Schema.Literals(["compaction", "full"]);
+export type AgentSessionHistoryMode = typeof AgentSessionHistoryMode.Type;
+
+/**
+ * Raised in steps as the user asks for more history. Filtering stays client-side.
+ * Omit `projectId` for Automatic: list recent sessions across every active project.
+ */
+export const AgentSessionListInput = Schema.Struct({
+  projectId: Schema.optional(ProjectId),
+  expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  limit: Schema.optional(PositiveInt),
+});
+export type AgentSessionListInput = typeof AgentSessionListInput.Type;
+
+/** Native provider percent (0–100). Never derived from used/max on the wire. */
+export const AgentSessionContextUsagePercent = Schema.Number.check(
+  Schema.isBetween({ minimum: 0, maximum: 100 }),
+);
+export type AgentSessionContextUsagePercent = typeof AgentSessionContextUsagePercent.Type;
+
+export const AgentSessionEntry = Schema.Struct({
+  provider: AgentSessionSource,
+  providerInstanceId: ProviderInstanceId,
+  providerSessionId: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  promptPreview: TrimmedNonEmptyString,
+  lastActiveAt: IsoDateTime,
+  /** When the session was created, when the provider exposes it. */
+  createdAt: IsoDateTime,
+  /** Timestamp of the latest retained message (or last activity). */
+  lastMessageAt: IsoDateTime,
+  cwd: TrimmedNonEmptyString,
+  /** Project this session belongs to (always set, including single-project lists). */
+  projectId: ProjectId,
+  projectTitle: TrimmedNonEmptyString,
+  alreadyImported: Schema.Boolean,
+  /** Max context window size when the provider reports it. */
+  contextMaxTokens: Schema.optional(NonNegativeInt),
+  /**
+   * Used tokens for compacted-history view (post-summary when a compact summary
+   * exists; otherwise the latest usage). Prefer this when "Use compacted chats"
+   * is on.
+   */
+  contextUsedTokens: Schema.optional(NonNegativeInt),
+  /**
+   * Used tokens for full-history view (pre-summary peak when a compact summary
+   * exists; otherwise same as `contextUsedTokens`). Listed beside the compact
+   * value so the client can toggle without re-scanning.
+   */
+  contextUsedTokensFull: Schema.optional(NonNegativeInt),
+  /**
+   * Native context usage percent from the provider (e.g. Cursor
+   * `composerData.contextUsagePercent`). Present alone without used/max is valid;
+   * used+max without percent is also valid. Do not derive this from used/max.
+   */
+  contextUsagePercent: Schema.optional(AgentSessionContextUsagePercent),
+  /** False when the row is listed but cannot be attached (e.g. oversized). */
+  importable: Schema.Boolean,
+  /** Present when `importable === false`. */
+  importBlockedReason: Schema.optional(TrimmedNonEmptyString),
+  /** True when the transcript contains Claude `isCompactSummary` records. */
+  hasCompactionSummary: Schema.Boolean,
+});
+export type AgentSessionEntry = typeof AgentSessionEntry.Type;
+
+export const AgentSessionProviderError = Schema.Struct({
+  provider: AgentSessionSource,
+  message: TrimmedNonEmptyString,
+});
+export type AgentSessionProviderError = typeof AgentSessionProviderError.Type;
+
+export const AgentSessionListResult = Schema.Struct({
+  entries: Schema.Array(AgentSessionEntry),
+  providerErrors: Schema.Array(AgentSessionProviderError),
+  /**
+   * Sessions discovery found but omitted because T3 already has them (imported
+   * threads or a live binding to the same provider session). Drives the empty
+   * "all already in T3" copy when `entries` is empty.
+   */
+  filteredAlreadyImportedCount: Schema.optional(NonNegativeInt),
+  truncated: Schema.optional(Schema.Boolean),
+});
+export type AgentSessionListResult = typeof AgentSessionListResult.Type;
+
+export const AgentSessionAttachInput = Schema.Struct({
+  projectId: ProjectId,
+  expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  providerInstanceId: ProviderInstanceId,
+  providerSessionId: TrimmedNonEmptyString,
+  /** Server defaults to `compaction` when omitted. */
+  historyMode: Schema.optional(AgentSessionHistoryMode),
+});
+export type AgentSessionAttachInput = typeof AgentSessionAttachInput.Type;
+
+export const AgentSessionAttachResult = Schema.Struct({
+  threadId: ThreadId,
+  created: Schema.Boolean,
+});
+export type AgentSessionAttachResult = typeof AgentSessionAttachResult.Type;
+
+export class AgentSessionUnavailableError extends Schema.TaggedError<AgentSessionUnavailableError>()(
+  "AgentSessionUnavailableError",
+  {
+    providerInstanceId: ProviderInstanceId,
+    providerSessionId: TrimmedNonEmptyString,
+  },
+) {
+  override get message(): string {
+    return `Session '${this.providerSessionId}' is no longer available from '${this.providerInstanceId}'.`;
+  }
+}
+
+/** Listed session that cannot be attached (oversized transcript, etc.). */
+export class AgentSessionImportBlockedError extends Schema.TaggedError<AgentSessionImportBlockedError>()(
+  "AgentSessionImportBlockedError",
+  {
+    providerInstanceId: ProviderInstanceId,
+    providerSessionId: TrimmedNonEmptyString,
+    importBlockedReason: TrimmedNonEmptyString,
+  },
+) {
+  override get message(): string {
+    return this.importBlockedReason;
+  }
+}
+
+export class AgentSessionAttachDeletedThreadError extends Schema.TaggedError<AgentSessionAttachDeletedThreadError>()(
+  "AgentSessionAttachDeletedThreadError",
+  { threadId: ThreadId },
+) {
+  override get message(): string {
+    return `Imported thread '${this.threadId}' was deleted. Restore it instead of importing the session again.`;
+  }
+}
+
 export class AgentSessionScanError extends Schema.TaggedError<AgentSessionScanError>()(
   "AgentSessionScanError",
   {
-    operation: Schema.Literals(["read-settings", "read-projects"]),
+    operation: Schema.Literals(["read-settings", "read-projects", "attach-session"]),
     cause: Schema.Defect(),
   },
 ) {

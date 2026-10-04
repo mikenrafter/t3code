@@ -1,11 +1,15 @@
-import * as NodeFs from "node:fs";
-import * as NodeOs from "node:os";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { readCursorComposerContextUsage, resolveCursorStateDbPath } from "./cursorComposerData.ts";
+import {
+  loadCursorComposerContextUsageIndex,
+  readCursorComposerContextUsage,
+  resolveCursorStateDbPath,
+} from "./cursorComposerData.ts";
 
 function writeComposerDataDb(
   dbPath: string,
@@ -17,7 +21,7 @@ function writeComposerDataDb(
     }>;
   },
 ): void {
-  NodeFs.mkdirSync(NodePath.dirname(dbPath), { recursive: true });
+  NodeFS.mkdirSync(NodePath.dirname(dbPath), { recursive: true });
   const db = new NodeSqlite.DatabaseSync(dbPath);
   try {
     db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
@@ -66,7 +70,7 @@ describe("resolveCursorStateDbPath", () => {
 
 describe("readCursorComposerContextUsage", () => {
   it("returns native contextUsagePercent without inventing token counts", () => {
-    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-cursor-composer-"));
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-composer-"));
     const dbPath = NodePath.join(dir, "state.vscdb");
     const sessionId = "5caf2dec-a694-4bdc-a180-4775e75bb307";
     writeComposerDataDb(dbPath, [
@@ -86,7 +90,7 @@ describe("readCursorComposerContextUsage", () => {
   });
 
   it("returns null when the composerData row is missing", () => {
-    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-cursor-composer-miss-"));
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-composer-miss-"));
     const dbPath = NodePath.join(dir, "state.vscdb");
     writeComposerDataDb(dbPath, []);
 
@@ -98,7 +102,7 @@ describe("readCursorComposerContextUsage", () => {
   });
 
   it("returns null for invalid percent or unreadable database", () => {
-    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-cursor-composer-bad-"));
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-composer-bad-"));
     const dbPath = NodePath.join(dir, "state.vscdb");
     writeComposerDataDb(dbPath, [
       { sessionId: "bad-percent", value: { contextUsagePercent: 101 } },
@@ -115,7 +119,7 @@ describe("readCursorComposerContextUsage", () => {
   });
 
   it("honors CURSOR_STATE_DB from env when stateDbPath is omitted", () => {
-    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-cursor-composer-env-"));
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-composer-env-"));
     const dbPath = NodePath.join(dir, "state.vscdb");
     writeComposerDataDb(dbPath, [{ sessionId: "env-session", value: { contextUsagePercent: 42 } }]);
 
@@ -127,7 +131,7 @@ describe("readCursorComposerContextUsage", () => {
   });
 
   it("falls back to composer.composerHeaders when composerData is missing", () => {
-    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-cursor-composer-headers-"));
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-composer-headers-"));
     const dbPath = NodePath.join(dir, "state.vscdb");
     const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     writeComposerDataDb(dbPath, [], {
@@ -137,5 +141,43 @@ describe("readCursorComposerContextUsage", () => {
     expect(readCursorComposerContextUsage(sessionId, { stateDbPath: dbPath })).toEqual({
       contextUsagePercent: 55.5,
     });
+  });
+});
+
+describe("loadCursorComposerContextUsageIndex", () => {
+  it("looks up only the requested sessions when given ids", () => {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-composer-ids-"));
+    const dbPath = NodePath.join(dir, "state.vscdb");
+    writeComposerDataDb(dbPath, [
+      { sessionId: "wanted", value: { contextUsagePercent: 12 } },
+      { sessionId: "other", value: { contextUsagePercent: 88 } },
+    ]);
+
+    expect([
+      ...loadCursorComposerContextUsageIndex({ stateDbPath: dbPath, sessionIds: ["wanted"] }),
+    ]).toEqual([["wanted", 12]]);
+    expect([...loadCursorComposerContextUsageIndex({ stateDbPath: dbPath })].toSorted()).toEqual([
+      ["other", 88],
+      ["wanted", 12],
+    ]);
+  });
+
+  it("skips a composer row whose JSON is malformed instead of losing the rest", () => {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cursor-composer-junk-"));
+    const dbPath = NodePath.join(dir, "state.vscdb");
+    writeComposerDataDb(dbPath, [{ sessionId: "good", value: { contextUsagePercent: 30 } }]);
+    const db = new NodeSqlite.DatabaseSync(dbPath);
+    try {
+      db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+        "composerData:junk",
+        "{not json",
+      );
+    } finally {
+      db.close();
+    }
+
+    expect([
+      ...loadCursorComposerContextUsageIndex({ stateDbPath: dbPath, sessionIds: ["junk", "good"] }),
+    ]).toEqual([["good", 30]]);
   });
 });

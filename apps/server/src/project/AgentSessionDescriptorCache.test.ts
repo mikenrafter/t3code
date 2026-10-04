@@ -6,6 +6,7 @@ import * as Path from "effect/Path";
 
 import {
   loadAgentSessionDescriptorCache,
+  MAX_CACHED_DESCRIPTORS,
   resolveAgentSessionDescriptorCachePath,
   type CachedDescriptorMeta,
 } from "./AgentSessionDescriptorCache.ts";
@@ -118,6 +119,27 @@ it.layer(NodeServices.layer)("AgentSessionDescriptorCache", (it) => {
       yield* cache.flush;
       const reloaded = yield* loadAgentSessionDescriptorCache(cacheDir);
       assert.deepEqual(reloaded.get("/sessions/a.jsonl", { size: 100, mtimeMs: 1_000 }), meta());
+    }),
+  );
+
+  it.effect("drops the least recently used entries past its size bound", () =>
+    Effect.gen(function* () {
+      const cacheDir = yield* makeCacheDir;
+      const cache = yield* loadAgentSessionDescriptorCache(cacheDir);
+      for (let index = 0; index < MAX_CACHED_DESCRIPTORS + 2; index += 1) {
+        cache.set(`/sessions/${index}.jsonl`, meta());
+      }
+      // A read keeps an old entry alive past newer ones.
+      cache.get("/sessions/0.jsonl", { size: 100, mtimeMs: 1_000 });
+      yield* cache.flush;
+
+      const reloaded = yield* loadAgentSessionDescriptorCache(cacheDir);
+      const identity = { size: 100, mtimeMs: 1_000 };
+      assert.isNotNull(reloaded.get("/sessions/0.jsonl", identity));
+      assert.isNull(reloaded.get("/sessions/1.jsonl", identity));
+      assert.isNull(reloaded.get("/sessions/2.jsonl", identity));
+      assert.isNotNull(reloaded.get("/sessions/3.jsonl", identity));
+      assert.isNotNull(reloaded.get(`/sessions/${MAX_CACHED_DESCRIPTORS + 1}.jsonl`, identity));
     }),
   );
 });
