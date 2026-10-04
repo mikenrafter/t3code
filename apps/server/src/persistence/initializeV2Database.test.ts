@@ -16,6 +16,7 @@ import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "./Layers/Sqlite.ts";
 import { runMigrations } from "./Migrations.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
+import { layer as providerSessionRuntimeLayer } from "./ProviderSessionRuntime.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -52,8 +53,9 @@ it.effect(
         Layer.provideMerge(databaseLayer),
       );
       const sink = EventSink.layer.pipe(Layer.provide(stores));
+      const runtimes = providerSessionRuntimeLayer.pipe(Layer.provide(databaseLayer));
       const importer = LegacyV1ThreadImporter.layer.pipe(
-        Layer.provideMerge(Layer.mergeAll(stores, sink)),
+        Layer.provideMerge(Layer.mergeAll(stores, sink, runtimes)),
       );
       yield* Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;

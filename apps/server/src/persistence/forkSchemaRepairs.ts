@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 
+import { ensureForkV1ResumeBridgeSchema } from "./ForkV1ResumeBridgeSchema.ts";
 import migrateAutoSettleDisabledAt from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
 
 /**
@@ -11,7 +12,10 @@ import migrateAutoSettleDisabledAt from "./Migrations/054_ProjectionThreadsAutoS
  * Fork builds recorded ledger id 54 as another migration, so upstream 054 never
  * ran there and `projection_threads.auto_settle_disabled_at` is missing. 054
  * only adds the column when absent, so replaying it is a no-op elsewhere.
+ *
+ * `fork_v1_resume_bridge` is fork-only state for the V1 resume bridge.
  */
 export const runForkSchemaRepairs = Effect.fn("runForkSchemaRepairs")(function* () {
   yield* migrateAutoSettleDisabledAt;
+  yield* ensureForkV1ResumeBridgeSchema;
 });

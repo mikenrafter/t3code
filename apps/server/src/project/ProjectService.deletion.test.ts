@@ -28,6 +28,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layer as providerSessionRuntimeLayer } from "../persistence/ProviderSessionRuntime.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
@@ -38,7 +39,9 @@ const eventPersistenceLayer = EventSink.layer.pipe(
   Layer.provideMerge(Layer.merge(EventStore.layer, ProjectionStore.layer)),
 );
 const servicesLayer = Layer.mergeAll(
-  LegacyV1ThreadImporter.layer.pipe(Layer.provideMerge(eventPersistenceLayer)),
+  LegacyV1ThreadImporter.layer.pipe(
+    Layer.provideMerge(Layer.merge(eventPersistenceLayer, providerSessionRuntimeLayer)),
+  ),
   ProjectionMaintenance.layer.pipe(Layer.provide(eventPersistenceLayer)),
   ProjectStore.layer,
   IdAllocator.layer,

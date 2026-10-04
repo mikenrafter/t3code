@@ -15,7 +15,9 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
   ProjectId,
+  defaultInstanceIdForDriver,
   ProviderInstanceId,
+  ProviderThreadId,
   ThreadId,
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
@@ -26,12 +28,18 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import {
+  ProviderSessionRuntime,
+  ProviderSessionRuntimeRepository,
+} from "../../persistence/ProviderSessionRuntime.ts";
 import * as EventSink from "../EventSink.ts";
 import { makeKeyedSerialExecutor } from "../KeyedSerialExecutor.ts";
 import { randomUuidV4 } from "../RandomUuid.ts";
+import { decodeLegacyV1ResumeCursor } from "./LegacyV1ResumeCursor.ts";
 
 const IMPORT_EVENT_PREFIX = "migration:v1";
 const TRANSCRIPT_EVENT_BATCH_SIZE = 100;
@@ -80,6 +88,23 @@ interface LegacyMessageRow {
   readonly ordinal: number;
 }
 
+type ProviderThreadUpdatedEvent = Extract<
+  OrchestrationV2DomainEvent,
+  { readonly type: "provider-thread.updated" }
+>;
+
+interface LegacyRuntimeRow {
+  readonly thread_id: string;
+  readonly provider_name: string;
+  readonly provider_instance_id: string | null;
+  readonly adapter_key: string;
+  readonly runtime_mode: string;
+  readonly status: string;
+  readonly last_seen_at: string;
+  readonly resume_cursor_json: string | null;
+  readonly runtime_payload_json: string | null;
+}
+
 interface LegacyImportRow {
   readonly thread_id: string;
   readonly transcript_imported_at: string | null;
@@ -126,6 +151,7 @@ const decodeLinkedPullRequest = Schema.decodeUnknownOption(ThreadLinkedPullReque
 const decodeStoredThread = Schema.decodeUnknownOption(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
 );
+const decodeRuntime = Schema.decodeUnknownOption(ProviderSessionRuntime);
 
 function parseJson(json: string): unknown {
   try {
@@ -133,6 +159,21 @@ function parseJson(json: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/** Stored JSON column as a value; text that does not parse is kept as the raw string. */
+function jsonColumnValue(json: string | null): unknown {
+  if (json === null) return null;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return json;
+  }
+}
+
+/** The V2 provider thread a migrated V1 thread resumes through. */
+function nativeProviderThreadId(threadId: string) {
+  return ProviderThreadId.make(`provider-thread:${IMPORT_EVENT_PREFIX}:${threadId}`);
 }
 
 function modelSelectionFor(row: LegacyThreadRow) {
@@ -347,7 +388,257 @@ function chunks<A>(items: ReadonlyArray<A>, size: number): Array<ReadonlyArray<A
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const eventSink = yield* EventSink.EventSinkV2;
+  const runtimes = yield* ProviderSessionRuntimeRepository;
   const transcriptImports = yield* makeKeyedSerialExecutor<ThreadId>();
+
+  const insertBridgeRecord = (input: {
+    readonly threadId: ThreadId;
+    readonly runtime: LegacyRuntimeRow;
+    readonly sessionStatus: string | null;
+    readonly modelSelection: ModelSelection;
+    readonly providerThreadId: ProviderThreadId | null;
+    readonly bindingStatus: "bound" | "unavailable" | "superseded";
+    readonly continuationStatus: "pending" | "skipped";
+    readonly reason: string | null;
+    readonly capturedAt: string;
+  }) => {
+    const { runtime } = input;
+    // The row as V1 wrote it, before binding normalizes it.
+    const sourceRuntime = {
+      threadId: runtime.thread_id,
+      providerName: runtime.provider_name,
+      providerInstanceId: runtime.provider_instance_id,
+      adapterKey: runtime.adapter_key,
+      runtimeMode: runtime.runtime_mode,
+      status: runtime.status,
+      lastSeenAt: runtime.last_seen_at,
+      resumeCursor: jsonColumnValue(runtime.resume_cursor_json),
+      runtimePayload: jsonColumnValue(runtime.runtime_payload_json),
+    };
+    return sql`
+      INSERT INTO fork_v1_resume_bridge (
+        thread_id,
+        source_runtime_json,
+        source_session_status,
+        source_model_selection_json,
+        provider_thread_id,
+        binding_status,
+        continuation_status,
+        reason,
+        captured_at
+      )
+      VALUES (
+        ${input.threadId},
+        ${JSON.stringify(sourceRuntime)},
+        ${input.sessionStatus},
+        ${JSON.stringify(input.modelSelection)},
+        ${input.providerThreadId},
+        ${input.bindingStatus},
+        ${input.continuationStatus},
+        ${input.reason},
+        ${input.capturedAt}
+      )
+      ON CONFLICT(thread_id) DO NOTHING
+    `;
+  };
+
+  /**
+   * Bind a migrated V1 thread to its native provider session. Runs inside the
+   * caller's transaction: it captures the V1 runtime row and session status,
+   * normalizes the runtime row to stopped, and returns the provider-thread
+   * event for the caller to write. `thread` must not yet have a V2 provider
+   * thread. Returns none, writing nothing but the bridge record, when the V1
+   * cursor names no session or `supersededReason` says V2 already used the thread.
+   * Threads without a runtime row, or already captured, are left alone.
+   */
+  const prepareNativeBinding = (input: {
+    readonly thread: OrchestrationV2AppThread;
+    readonly capturedAt: string;
+    readonly supersededReason?: string;
+  }) =>
+    Effect.gen(function* () {
+      const { thread, capturedAt } = input;
+      const captured = yield* sql`
+        SELECT 1 AS present FROM fork_v1_resume_bridge WHERE thread_id = ${thread.id}
+      `;
+      if (captured.length > 0) return Option.none<ProviderThreadUpdatedEvent>();
+      const runtimeRows = yield* sql<LegacyRuntimeRow>`
+        SELECT
+          thread_id,
+          provider_name,
+          provider_instance_id,
+          adapter_key,
+          runtime_mode,
+          status,
+          last_seen_at,
+          resume_cursor_json,
+          runtime_payload_json
+        FROM provider_session_runtime
+        WHERE thread_id = ${thread.id}
+      `;
+      const runtime = runtimeRows[0];
+      if (runtime === undefined) return Option.none<ProviderThreadUpdatedEvent>();
+      // Read before the runtime row is normalized below.
+      const sessionRows = yield* sql<{ readonly status: string }>`
+        SELECT status FROM projection_thread_sessions WHERE thread_id = ${thread.id}
+      `;
+      const sessionStatus = sessionRows[0]?.status ?? null;
+      const record = {
+        threadId: thread.id,
+        runtime,
+        sessionStatus,
+        modelSelection: thread.modelSelection,
+        capturedAt,
+      };
+      const unbound = (bindingStatus: "unavailable" | "superseded", reason: string) =>
+        insertBridgeRecord({
+          ...record,
+          providerThreadId: null,
+          bindingStatus,
+          continuationStatus: "skipped",
+          reason,
+        }).pipe(Effect.as(Option.none<ProviderThreadUpdatedEvent>()));
+      if (input.supersededReason !== undefined) {
+        return yield* unbound("superseded", input.supersededReason);
+      }
+
+      const decoded = decodeLegacyV1ResumeCursor(runtime.provider_name, runtime.resume_cursor_json);
+      if (Result.isFailure(decoded)) return yield* unbound("unavailable", decoded.failure);
+      const { driver, nativeId } = decoded.success;
+      const providerInstanceId =
+        runtime.provider_instance_id === null
+          ? defaultInstanceIdForDriver(driver)
+          : ProviderInstanceId.make(runtime.provider_instance_id);
+      const normalized = decodeRuntime({
+        threadId: runtime.thread_id,
+        providerName: runtime.provider_name,
+        providerInstanceId,
+        adapterKey: runtime.adapter_key,
+        runtimeMode: runtime.runtime_mode,
+        status: "stopped",
+        lastSeenAt: runtime.last_seen_at,
+        resumeCursor: jsonColumnValue(runtime.resume_cursor_json),
+        runtimePayload: jsonColumnValue(runtime.runtime_payload_json),
+      });
+      if (Option.isNone(normalized)) return yield* unbound("unavailable", "invalid-runtime-row");
+
+      const providerThreadId = nativeProviderThreadId(thread.id);
+      yield* insertBridgeRecord({
+        ...record,
+        providerThreadId,
+        bindingStatus: "bound",
+        // Only a thread V1 was actively working on, still on the same instance, is continued.
+        continuationStatus:
+          sessionStatus === "running" &&
+          thread.archivedAt === null &&
+          thread.deletedAt === null &&
+          thread.modelSelection.instanceId === providerInstanceId
+            ? "pending"
+            : "skipped",
+        reason: null,
+      });
+      yield* runtimes.upsert(normalized.value);
+      const occurredAt = thread.updatedAt;
+      return Option.some<ProviderThreadUpdatedEvent>({
+        id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${thread.id}:native-provider-thread`),
+        type: "provider-thread.updated",
+        threadId: thread.id,
+        driver,
+        providerInstanceId,
+        occurredAt,
+        payload: {
+          id: providerThreadId,
+          driver,
+          providerInstanceId,
+          providerSessionId: null,
+          appThreadId: thread.id,
+          ownerNodeId: null,
+          nativeThreadRef: { driver, nativeId, strength: "strong" },
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          pendingBackgroundTasks: [],
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        },
+      });
+    });
+
+  /**
+   * Bind shells imported before the bridge existed. Only shells with a V1
+   * runtime row and no bridge record are visited, so a settled database costs
+   * one indexed anti-join. A shell V2 has already used keeps its own state.
+   */
+  const reconcileNativeBindings = (now: string) =>
+    Effect.gen(function* () {
+      const candidates = yield* sql<{ readonly thread_id: string }>`
+        SELECT legacy_import.thread_id
+        FROM orchestration_v2_legacy_imports AS legacy_import
+        INNER JOIN provider_session_runtime AS runtime
+          ON runtime.thread_id = legacy_import.thread_id
+        WHERE NOT EXISTS (
+          SELECT 1 FROM fork_v1_resume_bridge AS bridge
+          WHERE bridge.thread_id = legacy_import.thread_id
+        )
+        ORDER BY legacy_import.thread_id ASC
+      `;
+      for (const candidate of candidates) {
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const rows = yield* sql<{
+              readonly payload_json: string;
+              readonly has_runs: number;
+              readonly has_provider_threads: number;
+            }>`
+              SELECT
+                projection.payload_json,
+                EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_runs AS run
+                  WHERE run.thread_id = projection.thread_id
+                ) AS has_runs,
+                EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_provider_threads AS provider_thread
+                  WHERE provider_thread.thread_id = projection.thread_id
+                ) AS has_provider_threads
+              FROM orchestration_v2_projection_threads AS projection
+              WHERE projection.thread_id = ${candidate.thread_id}
+            `;
+            const decoded =
+              rows[0] === undefined ? Option.none() : decodeStoredThread(rows[0].payload_json);
+            if (rows[0] === undefined || Option.isNone(decoded)) return;
+            const current = decoded.value;
+            const used =
+              rows[0].has_runs === 1 ||
+              rows[0].has_provider_threads === 1 ||
+              (current.activeProviderThreadId ?? null) !== null;
+            const binding = yield* prepareNativeBinding({
+              thread: current,
+              capturedAt: now,
+              ...(used ? { supersededReason: "v2-state-exists" } : {}),
+            });
+            if (Option.isNone(binding)) return;
+            yield* eventSink.write({
+              events: [
+                binding.value,
+                {
+                  id: EventId.make(
+                    `${IMPORT_EVENT_PREFIX}:thread:${candidate.thread_id}:native-binding-selected`,
+                  ),
+                  type: "thread.metadata-updated",
+                  threadId: current.id,
+                  providerInstanceId: current.providerInstanceId,
+                  occurredAt: dateTime(now),
+                  payload: { ...current, activeProviderThreadId: binding.value.payload.id },
+                },
+              ],
+            });
+          }),
+        );
+      }
+    });
 
   const listMessages = (threadId: ThreadId) =>
     sql<LegacyMessageRow>`
@@ -583,32 +874,39 @@ const make = Effect.gen(function* () {
       )
       ORDER BY thread.created_at ASC, thread.thread_id ASC
     `;
+    yield* reconcileNativeBindings(now);
     let importedThreadCount = repairedThreadCount;
     let importedMessageCount = 0;
     for (const row of rows) {
       const thread = importedThread(row);
       const previews = yield* listShellMessages(thread.id);
-      const events: Array<OrchestrationV2DomainEvent> = [
-        {
-          id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:created`),
-          type: "thread.created",
-          threadId: thread.id,
-          providerInstanceId: thread.providerInstanceId,
-          occurredAt: thread.createdAt,
-          payload: thread,
-        },
-        ...previews.flatMap(messageEvents),
-        {
-          id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:shell`),
-          type: "thread.metadata-updated",
-          threadId: thread.id,
-          providerInstanceId: thread.providerInstanceId,
-          occurredAt: thread.updatedAt,
-          payload: thread,
-        },
-      ];
       yield* sql.withTransaction(
         Effect.gen(function* () {
+          // Bound with the shell so no turn can start between the two.
+          const binding = yield* prepareNativeBinding({ thread, capturedAt: now });
+          const boundThread: OrchestrationV2AppThread = Option.isSome(binding)
+            ? { ...thread, activeProviderThreadId: binding.value.payload.id }
+            : thread;
+          const events: Array<OrchestrationV2DomainEvent> = [
+            {
+              id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:created`),
+              type: "thread.created",
+              threadId: thread.id,
+              providerInstanceId: thread.providerInstanceId,
+              occurredAt: thread.createdAt,
+              payload: boundThread,
+            },
+            ...(Option.isSome(binding) ? [binding.value] : []),
+            ...previews.flatMap(messageEvents),
+            {
+              id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:shell`),
+              type: "thread.metadata-updated",
+              threadId: thread.id,
+              providerInstanceId: thread.providerInstanceId,
+              occurredAt: thread.updatedAt,
+              payload: boundThread,
+            },
+          ];
           yield* Effect.forEach(
             previews,
             (message) =>
@@ -829,5 +1127,5 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   LegacyV1ThreadImporter,
   never,
-  EventSink.EventSinkV2 | SqlClient.SqlClient
+  EventSink.EventSinkV2 | ProviderSessionRuntimeRepository | SqlClient.SqlClient
 > = Layer.effect(LegacyV1ThreadImporter, make);

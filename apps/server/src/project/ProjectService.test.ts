@@ -22,6 +22,7 @@ import {
 } from "../orchestration-v2/runtimeLayer.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layer as providerSessionRuntimeLayer } from "../persistence/ProviderSessionRuntime.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
@@ -78,7 +79,9 @@ const ProjectServiceDependenciesLayer = Layer.mergeAll(
   ThreadCommandExecutor.layer,
 ).pipe(
   Layer.provideMerge(
-    LegacyV1ThreadImporter.layer.pipe(Layer.provide(OrchestrationV2EventSinkLayerLive)),
+    LegacyV1ThreadImporter.layer.pipe(
+      Layer.provide(Layer.merge(OrchestrationV2EventSinkLayerLive, providerSessionRuntimeLayer)),
+    ),
   ),
   Layer.provideMerge(ProjectEnrichmentService.layer),
   Layer.provideMerge(workspacePathsLayer),

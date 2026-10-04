@@ -33,6 +33,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { layer as providerSessionRuntimeLayer } from "../../persistence/ProviderSessionRuntime.ts";
 import { CommandPolicyCapabilityUnsupportedError } from "../CommandPolicy.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../Adapters/ClaudeAdapterV2.ts";
 import {
@@ -2252,8 +2253,13 @@ describe("orchestration v2 provider switching", () => {
           projectionStoreProvided,
         );
         const eventSinkProvided = EventSink.layer.pipe(Layer.provide(storesProvided));
+        const runtimeRepositoryProvided = providerSessionRuntimeLayer.pipe(
+          Layer.provide(databaseLayer),
+        );
         const importerProvided = LegacyV1ThreadImporter.layer.pipe(
-          Layer.provide(Layer.mergeAll(storesProvided, eventSinkProvided)),
+          Layer.provide(
+            Layer.mergeAll(storesProvided, eventSinkProvided, runtimeRepositoryProvided),
+          ),
         );
         const maintenanceProvided = ProjectionMaintenance.layer.pipe(Layer.provide(storesProvided));
         const orchestratorProvided = makeOrchestratorV2ReplayLayerWithRegistry(

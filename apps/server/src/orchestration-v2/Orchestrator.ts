@@ -679,13 +679,57 @@ function visibleDeltaRunOrdinals(
   };
 }
 
+/**
+ * A resumable root provider thread for the selected provider: its own, owned by
+ * the selected instance and driver, holding a strong native reference, and not
+ * closed, archived or failed. Migrated V1 threads are bound this way, and the
+ * provider already holds their conversation.
+ */
+export function hasNativeResumeTarget(input: {
+  readonly threadId: OrchestrationV2AppThread["id"];
+  readonly activeProviderThread:
+    | Pick<
+        OrchestrationV2ProviderThread,
+        | "driver"
+        | "providerInstanceId"
+        | "appThreadId"
+        | "ownerNodeId"
+        | "nativeThreadRef"
+        | "status"
+      >
+    | undefined;
+  readonly providerInstanceId: ModelSelection["instanceId"];
+  readonly driver: OrchestrationV2ProviderThread["driver"];
+}): boolean {
+  const providerThread = input.activeProviderThread;
+  if (providerThread === undefined) return false;
+  const nativeThreadRef = providerThread.nativeThreadRef;
+  return (
+    providerThread.appThreadId === input.threadId &&
+    providerThread.ownerNodeId === null &&
+    providerThread.providerInstanceId === input.providerInstanceId &&
+    providerThread.driver === input.driver &&
+    nativeThreadRef !== null &&
+    nativeThreadRef.strength === "strong" &&
+    nativeThreadRef.nativeId !== null &&
+    nativeThreadRef.driver === providerThread.driver &&
+    (providerThread.status === "idle" ||
+      providerThread.status === "active" ||
+      providerThread.status === "not_loaded")
+  );
+}
+
 export function shouldPrepareLegacyImportHandoff(input: {
   readonly hasCompletedRun: boolean;
   readonly historyOrigin: OrchestrationV2AppThread["historyOrigin"];
   readonly legacyImportItemCount: number;
+  readonly hasNativeResumeTarget: boolean;
 }): boolean {
   return (
-    input.historyOrigin === "v1_import" && !input.hasCompletedRun && input.legacyImportItemCount > 0
+    input.historyOrigin === "v1_import" &&
+    !input.hasCompletedRun &&
+    !input.hasNativeResumeTarget &&
+    input.legacyImportItemCount > 0
   );
 }
 
@@ -5022,10 +5066,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
       const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
       const latestHandoffRun = projection.runs.findLast(isHandoffSourceRun);
-      const legacyImportItems =
-        projection.thread.historyOrigin === "v1_import"
-          ? yield* readHandoffItems(command.threadId, [null])
-          : [];
       const isProviderSwitch =
         activeProviderThread !== undefined &&
         activeProviderThread.providerInstanceId !== modelSelection.instanceId;
@@ -5080,10 +5120,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             driver: adapter.driver,
             nativeThreadId: `pending:${runId}`,
           });
+        // A bound native session already holds the imported conversation, so
+        // neither the handoff nor the items it would replay are needed.
+        const resumesNativeSession = hasNativeResumeTarget({
+          threadId: command.threadId,
+          activeProviderThread,
+          providerInstanceId: modelSelection.instanceId,
+          driver: adapter.driver,
+        });
+        const legacyImportItems =
+          projection.thread.historyOrigin === "v1_import" &&
+          latestCompletedRun === undefined &&
+          !resumesNativeSession
+            ? yield* readHandoffItems(command.threadId, [null])
+            : [];
         const legacyImportHandoff = shouldPrepareLegacyImportHandoff({
           historyOrigin: projection.thread.historyOrigin,
           hasCompletedRun: latestCompletedRun !== undefined,
           legacyImportItemCount: legacyImportItems.length,
+          hasNativeResumeTarget: resumesNativeSession,
         })
           ? yield* contextHandoffService
               .prepareLegacyImport({
@@ -5383,6 +5438,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
         return;
       }
+      const legacyImportItems =
+        projection.thread.historyOrigin === "v1_import"
+          ? yield* readHandoffItems(command.threadId, [null])
+          : [];
       const sourceProjection =
         pendingForkTransfer === undefined
           ? null

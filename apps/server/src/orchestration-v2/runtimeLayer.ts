@@ -83,7 +83,7 @@ export const OrchestrationV2EventSinkLayerLive = eventSinkLayer.pipe(Layer.provi
 const eventSinkProvided = OrchestrationV2EventSinkLayerLive;
 const projectionMaintenanceProvided = projectionMaintenanceLayer.pipe(Layer.provide(storesLayer));
 const legacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
-  Layer.provide(eventSinkProvided),
+  Layer.provide(Layer.merge(eventSinkProvided, providerSessionRuntimeLayer)),
 );
 
 export const ProjectServiceLayerLive = projectServiceLayer.pipe(
