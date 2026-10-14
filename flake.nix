@@ -21,6 +21,14 @@
         pkgs = import nixpkgs { inherit system; };
         lib = nixpkgs.lib;
 
+        # Electron is unfree; llm-agents' packaging takes an electron_NN
+        # straight from its own nixpkgs pin. Import that pin with allowUnfree
+        # so eval does not hit the free-only consumer nixpkgs.
+        agentsPkgs = import llm-agents.inputs.nixpkgs {
+          inherit system;
+          config.allowUnfree = true;
+        };
+
         # llm-agents.nix's own `packages.${system}` output runs every package
         # it ships (~200+) through a per-system availability filter, which
         # forces each one to construct just to check its meta — so merely
@@ -28,16 +36,16 @@
         # unrelated, broken package elsewhere in their tree. `overlays.
         # shared-nixpkgs` exposes the same packages unfiltered as plain lazy
         # attrset keys, so only `t3code` itself gets forced below.
-        agents = (pkgs.extend llm-agents.overlays.shared-nixpkgs).llm-agents;
-
-        # Electron is unfree; llm-agents' packaging (post 3e108f2a) takes
-        # `electron_43` from its own nixpkgs pin. Import that pin with
-        # allowUnfree and pass it through so eval does not hit the free-only
-        # consumer nixpkgs.
-        agentsPkgs = import llm-agents.inputs.nixpkgs {
-          inherit system;
-          config.allowUnfree = true;
-        };
+        #
+        # Extend `agentsPkgs` (llm-agents' own nixpkgs pin), not this file's
+        # plain `pkgs`: llm-agents' packages auto-wire their args (electron_NN
+        # included) from whatever pkgs the scope was built against, and
+        # agents.t3code's *default* unwrapped build (forced below just by
+        # constructing agents.t3code, before our own override ever applies)
+        # needs that to resolve to a real, allowUnfree-enabled electron_NN —
+        # extending this file's own separately-pinned, free-only `pkgs`
+        # doesn't give it one.
+        agents = (agentsPkgs.extend llm-agents.overlays.shared-nixpkgs).llm-agents;
 
         # llm-agents pins the upstream v0.0.33 tarball together with the pnpm
         # store hash that goes with it. This branch has been synced with t3code
@@ -49,11 +57,14 @@
         #
         # native/ is unchanged from v0.0.33, so the Rust resource-monitor and
         # its cargoHash are left on the upstream source.
+        # No explicit electron_NN override needed: `agents` now extends
+        # `agentsPkgs` itself (see above), so agents.t3code.unwrapped's
+        # electron_NN arg already auto-wires from there — whatever the
+        # current name is, with allowUnfree already on. One less hardcoded
+        # name to fall out of sync when llm-agents.nix bumps it again.
         t3code = agents.t3code.override {
           t3code-unwrapped =
-            (agents.t3code.unwrapped.override {
-              electron_43 = agentsPkgs.electron_43;
-            }).overrideAttrs
+            agents.t3code.unwrapped.overrideAttrs
               (old: {
                 src = self;
                 pnpmDeps = old.pnpmDeps.override {
