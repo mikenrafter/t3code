@@ -68,11 +68,16 @@
         # (x86_64-darwin in particular), so only expose it where it exists.
         # `agents ? t3code` is now a cheap key check (see `agents` above);
         # the actual per-system availability check mirrors llm-agents.nix's
-        # own `available` predicate, but against just this one package.
+        # own `available` predicate, but against the *overridden* `t3code`
+        # above rather than `agents.t3code` directly — the latter's default
+        # `t3code-unwrapped` can fail to construct on its own (e.g. an
+        # electron_NN version mismatch against llm-agents' own nixpkgs pin)
+        # even when our override builds fine, since it never evaluates
+        # that default.
         packages = lib.optionalAttrs (
           agents ? t3code
-          && lib.meta.availableOn pkgs.stdenv.hostPlatform agents.t3code
-          && !(agents.t3code.meta.broken or false)
+          && lib.meta.availableOn pkgs.stdenv.hostPlatform t3code
+          && !(t3code.meta.broken or false)
         ) {
           inherit t3code;
           default = t3code;
