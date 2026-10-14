@@ -20,7 +20,15 @@
       let
         pkgs = import nixpkgs { inherit system; };
         lib = nixpkgs.lib;
-        agents = llm-agents.packages.${system};
+
+        # llm-agents.nix's own `packages.${system}` output runs every package
+        # it ships (~200+) through a per-system availability filter, which
+        # forces each one to construct just to check its meta — so merely
+        # touching one attribute of `packages.${system}` can abort on an
+        # unrelated, broken package elsewhere in their tree. `overlays.
+        # shared-nixpkgs` exposes the same packages unfiltered as plain lazy
+        # attrset keys, so only `t3code` itself gets forced below.
+        agents = (pkgs.extend llm-agents.overlays.shared-nixpkgs).llm-agents;
 
         # Electron is unfree; llm-agents' packaging (post 3e108f2a) takes
         # `electron_43` from its own nixpkgs pin. Import that pin with
@@ -58,7 +66,14 @@
       {
         # t3code is not packaged for every system flake-utils enumerates
         # (x86_64-darwin in particular), so only expose it where it exists.
-        packages = lib.optionalAttrs (agents ? t3code) {
+        # `agents ? t3code` is now a cheap key check (see `agents` above);
+        # the actual per-system availability check mirrors llm-agents.nix's
+        # own `available` predicate, but against just this one package.
+        packages = lib.optionalAttrs (
+          agents ? t3code
+          && lib.meta.availableOn pkgs.stdenv.hostPlatform agents.t3code
+          && !(agents.t3code.meta.broken or false)
+        ) {
           inherit t3code;
           default = t3code;
         };
