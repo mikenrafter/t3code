@@ -2,92 +2,41 @@
   description = "t3code dev environment and Nix package";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # Pinned to a specific nixpkgs-unstable commit, not the nixos-26.05
+    # branch: electron_44 (needed below) isn't backported to the stable
+    # branch yet, only unstable has it. Pin by commit rather than branch
+    # name so this doesn't silently re-resolve to a newer/older electron_NN
+    # later — bump deliberately when it needs to move.
+    nixpkgs.url = "github:NixOS/nixpkgs/8edc0c72e3a38faf5434e40d1f19431125fe4b30";
     flake-utils.url = "github:numtide/flake-utils";
-
-    # Upstream Nix packaging for t3code. This flake reuses it wholesale and
-    # only swaps in this branch's source plus the pnpm store that matches this
-    # branch's lockfile.
-    #
-    # Deliberately does not follow nixpkgs: llm-agents.nix publishes a binary
-    # cache keyed to its own nixpkgs pin, and re-pointing it here would force
-    # every dependency to rebuild from source.
-    llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
-  outputs = { self, nixpkgs, flake-utils, llm-agents }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs { inherit system; };
-        lib = nixpkgs.lib;
-
-        # Electron is unfree; llm-agents' packaging takes an electron_NN
-        # straight from its own nixpkgs pin. Import that pin with allowUnfree
-        # so eval does not hit the free-only consumer nixpkgs.
-        agentsPkgs = import llm-agents.inputs.nixpkgs {
+        # Electron is unfree, and `nix/unwrapped.nix` takes it (and
+        # everything else) straight from here — no llm-agents.nix
+        # dependency. ai-cli (a separate scout module) pulls llm-agents.nix
+        # for the claude-code/codex binaries; t3code doesn't need to.
+        pkgs = import nixpkgs {
           inherit system;
           config.allowUnfree = true;
         };
+        lib = nixpkgs.lib;
 
-        # llm-agents.nix's own `packages.${system}` output runs every package
-        # it ships (~200+) through a per-system availability filter, which
-        # forces each one to construct just to check its meta — so merely
-        # touching one attribute of `packages.${system}` can abort on an
-        # unrelated, broken package elsewhere in their tree. `overlays.
-        # shared-nixpkgs` exposes the same packages unfiltered as plain lazy
-        # attrset keys, so only `t3code` itself gets forced below.
-        #
-        # Extend `agentsPkgs` (llm-agents' own nixpkgs pin), not this file's
-        # plain `pkgs`: llm-agents' packages auto-wire their args (electron_NN
-        # included) from whatever pkgs the scope was built against, and
-        # agents.t3code's *default* unwrapped build (forced below just by
-        # constructing agents.t3code, before our own override ever applies)
-        # needs that to resolve to a real, allowUnfree-enabled electron_NN —
-        # extending this file's own separately-pinned, free-only `pkgs`
-        # doesn't give it one.
-        agents = (agentsPkgs.extend llm-agents.overlays.shared-nixpkgs).llm-agents;
-
-        # llm-agents pins the upstream v0.0.33 tarball together with the pnpm
-        # store hash that goes with it. This branch has been synced with t3code
-        # main since that tag, so pnpm-lock.yaml gained dependencies the pinned
-        # store does not contain (@clerk/electron among them) and the build dies
-        # with ERR_PNPM_NO_OFFLINE_TARBALL. Refetch the store from this branch
-        # and keep its hash here, in the same repo as the lockfile that
-        # determines it — a later sync with main updates both in one commit.
-        #
-        # native/ is unchanged from v0.0.33, so the Rust resource-monitor and
-        # its cargoHash are left on the upstream source.
-        # No explicit electron_NN override needed: `agents` now extends
-        # `agentsPkgs` itself (see above), so agents.t3code.unwrapped's
-        # electron_NN arg already auto-wires from there — whatever the
-        # current name is, with allowUnfree already on. One less hardcoded
-        # name to fall out of sync when llm-agents.nix bumps it again.
-        t3code = agents.t3code.override {
-          t3code-unwrapped =
-            agents.t3code.unwrapped.overrideAttrs
-              (old: {
-                src = self;
-                pnpmDeps = old.pnpmDeps.override {
-                  src = self;
-                  hash = "sha256-VS3JQu+wbWuVeQaH3+DqtrFU5MY6EUZS+Gv+awcFGAA=";
-                };
-              });
+        t3code = pkgs.callPackage ./nix/package.nix {
+          t3code-unwrapped = pkgs.callPackage ./nix/unwrapped.nix {
+            inherit self;
+            formatelf = pkgs.callPackage ./nix/formatelf.nix { };
+            versionCheckHomeHook = pkgs.callPackage ./nix/version-check-home-hook.nix { };
+          };
         };
       in
       {
         # t3code is not packaged for every system flake-utils enumerates
         # (x86_64-darwin in particular), so only expose it where it exists.
-        # `agents ? t3code` is now a cheap key check (see `agents` above);
-        # the actual per-system availability check mirrors llm-agents.nix's
-        # own `available` predicate, but against the *overridden* `t3code`
-        # above rather than `agents.t3code` directly — the latter's default
-        # `t3code-unwrapped` can fail to construct on its own (e.g. an
-        # electron_NN version mismatch against llm-agents' own nixpkgs pin)
-        # even when our override builds fine, since it never evaluates
-        # that default.
         packages = lib.optionalAttrs (
-          agents ? t3code
-          && lib.meta.availableOn pkgs.stdenv.hostPlatform t3code
+          lib.meta.availableOn pkgs.stdenv.hostPlatform t3code
           && !(t3code.meta.broken or false)
         ) {
           inherit t3code;
