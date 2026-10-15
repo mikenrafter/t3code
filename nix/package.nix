@@ -1,5 +1,4 @@
 {
-  lib,
   callPackage,
   stdenvNoCC,
   makeBinaryWrapper,
@@ -9,11 +8,6 @@
 stdenvNoCC.mkDerivation {
   pname = "t3code";
   inherit (t3code-unwrapped) version;
-
-  outputs = [
-    "out"
-    "desktop"
-  ];
 
   dontUnpack = true;
   strictDeps = true;
@@ -28,25 +22,10 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
 
-    mkdir -p "$out/bin" "$desktop/bin"
+    mkdir -p "$out/bin"
 
     makeWrapper ${t3code-unwrapped}/bin/t3 "$out/bin/t3"
     ln -s ${t3code-unwrapped}/share "$out/share"
-
-    makeWrapper ${t3code-unwrapped.desktop}/bin/t3code-desktop \
-      "$desktop/bin/t3code-desktop" \
-      --inherit-argv0
-    ln -s ${t3code-unwrapped.desktop}/share "$desktop/share"
-
-    ${lib.optionalString stdenvNoCC.hostPlatform.isDarwin ''
-      sourceApp=${lib.escapeShellArg "${t3code-unwrapped.desktop}/Applications/${t3code-unwrapped.appName}.app"}
-      targetApp="$desktop/Applications/${t3code-unwrapped.appName}.app"
-      mkdir -p "$targetApp/Contents/MacOS"
-      ln -s "$sourceApp/Contents/Info.plist" "$targetApp/Contents/Info.plist"
-      ln -s "$sourceApp/Contents/Resources" "$targetApp/Contents/Resources"
-      ln -s ../../../../bin/t3code-desktop \
-        "$targetApp/Contents/MacOS/${t3code-unwrapped.appName}"
-    ''}
 
     runHook postInstall
   '';

@@ -2,11 +2,12 @@
   description = "t3code dev environment and Nix package";
 
   inputs = {
-    # Pinned to a specific nixpkgs-unstable commit, not the nixos-26.05
-    # branch: electron_44 (needed below) isn't backported to the stable
-    # branch yet, only unstable has it. Pin by commit rather than branch
-    # name so this doesn't silently re-resolve to a newer/older electron_NN
-    # later — bump deliberately when it needs to move.
+    # Pinned to a specific nixpkgs-unstable commit rather than the
+    # nixos-26.05 branch so it doesn't silently re-resolve later — bump
+    # deliberately when it needs to move. (Originally pinned for
+    # electron_44, which this package no longer builds — see nix/
+    # unwrapped.nix — but kept at the same commit regardless, since nothing
+    # here needs it to move either.)
     nixpkgs.url = "github:NixOS/nixpkgs/8edc0c72e3a38faf5434e40d1f19431125fe4b30";
     flake-utils.url = "github:numtide/flake-utils";
   };
@@ -14,14 +15,11 @@
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        # Electron is unfree, and `nix/unwrapped.nix` takes it (and
-        # everything else) straight from here — no llm-agents.nix
-        # dependency. ai-cli (a separate scout module) pulls llm-agents.nix
-        # for the claude-code/codex binaries; t3code doesn't need to.
-        pkgs = import nixpkgs {
-          inherit system;
-          config.allowUnfree = true;
-        };
+        # `nix/unwrapped.nix` takes everything straight from here — no
+        # llm-agents.nix dependency. ai-cli (a separate scout module) pulls
+        # llm-agents.nix for the claude-code/codex binaries; t3code doesn't
+        # need to.
+        pkgs = import nixpkgs { inherit system; };
         lib = nixpkgs.lib;
 
         t3code = pkgs.callPackage ./nix/package.nix {

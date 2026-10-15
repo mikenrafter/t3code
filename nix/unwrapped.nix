@@ -6,25 +6,17 @@
   fetchPnpmDeps,
   pnpm_11,
   pnpmConfigHook,
-  pnpmBuildHook,
   nodejs_24,
   node-gyp,
   pkg-config,
   formatelf,
-  libsecret,
   python3,
   cacert,
-  electron_44,
   makeBinaryWrapper,
   installShellFiles,
-  makeDesktopItem,
   rustPlatform,
   versionCheckHook,
   versionCheckHomeHook,
-  cctools,
-  libicns,
-  writeDarwinBundle,
-  xcbuild,
 }:
 
 let
@@ -37,9 +29,10 @@ let
   # The web build's third-party-licenses vite plugin downloads SPDX license
   # texts unless they are already cached under .generated/. Keep rev in sync
   # with SPDX_LICENSE_LIST_REVISION in scripts/lib/third-party-licenses.ts.
-  # (apps/desktop's own build doesn't import this plugin at all — only
-  # apps/web's vite config does — but keeping the check means a future
-  # resync with upstream can't silently drift it out from under us.)
+  # (Neither apps/desktop's build nor the server-only build below imports
+  # this plugin at all — only apps/web's vite config does — but keeping the
+  # check means a future resync with upstream can't silently drift it out
+  # from under us.)
   spdxLicenses = fetchFromGitHub {
     owner = "spdx";
     repo = "license-list-data";
@@ -69,29 +62,20 @@ let
     }
     .${stdenv.hostPlatform.system};
 
+  # Keep the same filter set as upstream's build:desktop here: this list
+  # drives fetchPnpmDeps and the initial `pnpm install` (the whole
+  # lockfile-consistent dependency graph, including hoisting and optional
+  # native-binding packages like vite-plus's), not what actually gets
+  # built. Narrowing *that* happens downstream (buildPhase/installPhase's
+  # --filter t3) — dropping @t3tools/desktop... here instead changed
+  # pnpm's install-time resolution and broke vite-plus's native binding
+  # placement (unrelated to Electron at all).
   pnpmWorkspaces = [
     "@t3tools/monorepo"
     "t3..."
     "@t3tools/desktop..."
     "@t3tools/scripts..."
   ];
-
-  appName = "T3 Code (Alpha)";
-  desktopIcon =
-    if stdenv.hostPlatform.isDarwin then
-      "assets/prod/black-macos-1024.png"
-    else
-      "assets/prod/black-universal-1024.png";
-
-  desktopItem = makeDesktopItem {
-    name = "t3code";
-    desktopName = appName;
-    comment = "Control surface for coding agents";
-    exec = "t3code-desktop %U";
-    icon = "t3code";
-    categories = [ "Development" ];
-    startupWMClass = "t3code";
-  };
 in
 stdenv.mkDerivation {
   inherit
@@ -100,11 +84,6 @@ stdenv.mkDerivation {
     src
     pnpmWorkspaces
     ;
-
-  outputs = [
-    "out"
-    "desktop"
-  ];
 
   strictDeps = true;
   __structuredAttrs = true;
@@ -136,33 +115,22 @@ stdenv.mkDerivation {
     node-gyp
     nodejs_24
     pnpm
-    pnpmBuildHook
     pnpmConfigHook
     python3
   ]
   ++ lib.optionals stdenv.hostPlatform.isLinux [
     formatelf
     pkg-config
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isDarwin [
-    cctools.libtool
-    libicns
-    writeDarwinBundle
-    xcbuild
   ];
 
-  # build:desktop compiles native/browser-secret against libsecret on linux
+  # Server-only native deps (node-pty's prebuilt binaries need libstdc++ at
+  # runtime, see postFixup below). No libsecret: that's only pulled in by
+  # native/browser-secret, which is desktop/Electron-only and not built here.
   buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
-    libsecret
     stdenv.cc.cc.lib
   ];
 
-  # We run electron on an unpacked tree, so app.isPackaged is false and the
-  # backend would treat the store path as the workspace root (#9182).
   postPatch = ''
-    substituteInPlace apps/desktop/src/app/DesktopEnvironment.ts \
-      --replace-fail "backendCwd: input.isPackaged ? homeDirectory : appRoot," "backendCwd: homeDirectory,"
-
     spdxRev=$(sed -n 's/^const SPDX_LICENSE_LIST_REVISION = "\(.*\)";/\1/p' scripts/lib/third-party-licenses.ts)
     if [[ "$spdxRev" != "${spdxLicenses.rev}" ]]; then
       echo "error: upstream pins SPDX license-list-data $spdxRev, update spdxLicenses" >&2
@@ -178,22 +146,20 @@ stdenv.mkDerivation {
 
     node scripts/update-release-package-versions.ts ${version}
 
-    upstream_electron=$(node -p "require('./apps/desktop/package.json').dependencies.electron")
-    upstream_major=''${upstream_electron#^}
-    upstream_major=''${upstream_major%%.*}
-    nix_major=${lib.versions.major electron_44.version}
-    if (( upstream_major > nix_major )); then
-      echo "error: upstream expects Electron $upstream_electron but nixpkgs provides ${electron_44.version}" >&2
-      exit 1
-    fi
-
     export npm_config_nodedir=${nodejs_24}
-    export ELECTRON_SKIP_BINARY_DOWNLOAD=1
     pnpm rebuild --pending "''${pnpmInstallFlags[@]}" \
-      --filter '!@t3tools/monorepo'
+      --filter '!@t3tools/monorepo' --filter '!@t3tools/desktop'
   '';
 
-  pnpmBuildScript = "build:desktop";
+  # No package.json script builds just the server (build:desktop's --filter
+  # list also builds @t3tools/desktop, which needs Electron). `pnpm exec`
+  # resolves vp from node_modules/.bin directly, same as pnpmBuildHook's
+  # pnpmBuildScript convention would, without a dedicated package.json script.
+  buildPhase = ''
+    runHook preBuild
+    pnpm exec vp run --filter t3 build
+    runHook postBuild
+  '';
 
   # Dependencies include prebuilt artifacts for foreign systems and statically
   # linked executables, which must not be patched or audited as host binaries.
@@ -204,7 +170,7 @@ stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
 
-    # Deploy isolated production graphs instead of the whole workspace store.
+    # Deploy an isolated production graph instead of the whole workspace store.
     pnpm --filter t3 deploy --prod --offline "$out/libexec/t3code/apps/server"
 
     mkdir -p "$out/libexec/t3code/apps/server/dist/resource-monitor/${platformKey}"
@@ -215,54 +181,12 @@ stdenv.mkDerivation {
     makeWrapper ${lib.getExe nodejs_24} "$out/bin/t3" \
       --add-flags "$out/libexec/t3code/apps/server/dist/bin.mjs"
 
-    pnpm --filter @t3tools/desktop deploy --prod --offline "$desktop/libexec/t3code/apps/desktop"
-    cp -r --no-preserve=mode apps/desktop/dist-electron "$desktop/libexec/t3code/apps/desktop/"
-    mkdir -p "$desktop/libexec/t3code/apps/desktop/prod-resources"
-    install -Dm444 ${desktopIcon} \
-      "$desktop/libexec/t3code/apps/desktop/prod-resources/icon.png"
-
-    ln -s "$out/libexec/t3code/apps/server" "$desktop/libexec/t3code/apps/server"
-
-    mkdir -p "$desktop/libexec/t3code/apps/desktop/prod-resources/resource-monitor"
-    ln -s \
-      "$out/libexec/t3code/apps/server/dist/resource-monitor/${platformKey}/t3-resource-monitor" \
-      "$desktop/libexec/t3code/apps/desktop/prod-resources/resource-monitor/t3-resource-monitor"
-
-    ${lib.optionalString stdenv.hostPlatform.isLinux ''
-      install -Dm755 native/browser-secret/build/${stdenv.hostPlatform.node.arch}/t3-browser-secret \
-        "$desktop/libexec/t3code/apps/desktop/prod-resources/browser-secret/t3-browser-secret"
-    ''}
-
-    find "$out/libexec/t3code" "$desktop/libexec/t3code" -xtype l -delete
-
-    mkdir -p "$desktop/bin"
-    makeWrapper ${lib.getExe electron_44} "$desktop/bin/t3code-desktop" \
-      --add-flags "$desktop/libexec/t3code/apps/desktop" \
-      --inherit-argv0
-
-    mkdir -p "$desktop/share/icons/hicolor/scalable/apps"
-    install -Dm444 ${desktopIcon} "$desktop/share/icons/t3code.png"
-    install -Dm444 assets/prod/logo.svg "$desktop/share/icons/hicolor/scalable/apps/t3code.svg"
-    cp -r ${desktopItem}/share/applications "$desktop/share/"
-
-    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
-      find "$out/libexec/t3code" "$desktop/libexec/t3code" \
-        -path '*/node-pty/prebuilds/darwin-*/spawn-helper' \
-        -exec chmod 755 {} +
-
-      mkdir -p "$desktop/Applications/${appName}.app/Contents/"{MacOS,Resources}
-      png2icns \
-        "$desktop/Applications/${appName}.app/Contents/Resources/t3code.icns" \
-        ${desktopIcon}
-      ${stdenv.shell} ${lib.getExe writeDarwinBundle} \
-        "$desktop" "${appName}" t3code-desktop t3code
-    ''}
+    find "$out/libexec/t3code" -xtype l -delete
 
     runHook postInstall
   '';
 
-  # Electron, unlike node, does not already have libstdc++ loaded for the
-  # prebuilt pty.node (#10125).
+  # node-pty's prebuilt binaries don't already have libstdc++ loaded (#10125).
   postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
     autoPatchelf "$out/libexec/t3code/apps/server/node_modules/node-pty/prebuilds/${platformKey}"
   '';
@@ -282,7 +206,7 @@ stdenv.mkDerivation {
 
   passthru = {
     category = "AI Coding Agents";
-    inherit appName resourceMonitor;
+    inherit resourceMonitor;
   };
 
   meta = {
